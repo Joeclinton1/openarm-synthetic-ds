@@ -1,0 +1,17 @@
+name: UnifoLM WBT
+repo_id: unitreerobotics/G1_WBT_Brainco_Collect_Plates_Into_Dishwasher
+adapter: lerobot
+fps: 30
+rotation_representation: euler
+rotation_euler_order: xyz
+position_scale: 1.0
+arm_order: [left, right]
+calibrated: false
+gripper_mode: brainco_fingers
+fields:
+  pose: observation.state.ee_state
+  gripper: observation.state.hand_state
+tabletop_tasks: [plates, dishwasher, medicine, drinks, vegetables]
+notes: >-
+  ee_state is FK-derived root-to-left followed by root-to-right xyz-rpy and includes waist
+  motion. Root frame origin and end-effector tool offset require calibration.

@@ -1,0 +1,17 @@
+name: HIW-500
+repo_id: BitRobot/HIW-500-LeRobot
+adapter: lerobot
+fps: 30
+rotation_representation: euler
+rotation_euler_order: xyz
+position_scale: 1.0
+arm_order: [left, right]
+calibrated: false
+gripper_mode: normalized
+fields:
+  pose: observation.state.wbc
+  # HIW pose occupies indices 7:19 and needs adapter slicing; use the dedicated HIW preset.
+tabletop_tasks: [hang hanger, hang keys]
+notes: >-
+  The published WBC vector is pivot[0:7], left xyz-rpy[7:13], right xyz-rpy[13:19],
+  then left/right trigger+squeeze. G1 root-to-OpenArm root calibration remains required.

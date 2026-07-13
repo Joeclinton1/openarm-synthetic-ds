@@ -1,0 +1,44 @@
+# Local environments and secrets
+/.venv/
+/venv/
+/.env
+/.env.*
+!/.env.example
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+*.so
+/.pytest_cache/
+/.ruff_cache/
+/.mypy_cache/
+/.coverage
+/htmlcov/
+*.egg-info/
+
+# Build and packaging output
+/build/
+/dist/
+
+# Downloaded datasets, models, converted datasets, and generated media
+/data/
+/outputs/
+
+# Third-party source trees and downloaded applications are installed locally
+/vendor/
+
+# Large model and media artifacts accidentally created outside the directories above
+*.ckpt
+*.engine
+*.mp4
+*.npz
+*.onnx
+*.pth
+*.pt
+*.safetensors
+
+# Editors and operating systems
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db

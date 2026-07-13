@@ -1,0 +1,19 @@
+name: MolmoAct2 Tabletop
+repo_id: allenai/MolmoAct2-MolmoAct-Dataset-Tabletop
+adapter: lerobot
+fps: 20
+rotation_representation: rotvec
+position_scale: 1.0
+single_arm_side: right
+arm_order: [right]
+calibrated: false
+gripper_mode: normalized
+fields:
+  pose: observation.state
+  gripper: observation.state
+  gripper_index: '6'
+tabletop_tasks: [all]
+notes: >-
+  Explicitly tabletop, single-arm Franka absolute xyz plus rotation-vector pose at 20 Hz.
+  The published v3 repository is a fixed Franka embodiment; its Franka-base to OpenArm-base
+  transform still requires physical correspondences.
