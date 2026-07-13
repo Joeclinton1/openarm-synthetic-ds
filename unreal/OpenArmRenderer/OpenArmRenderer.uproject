@@ -1,0 +1,19 @@
+{
+  "FileVersion": 3,
+  "EngineAssociation": "5.7",
+  "Category": "Robotics",
+  "Description": "Minimal cooked OpenArm URLab renderer",
+  "Modules": [
+    {
+      "Name": "OpenArmRenderer",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ],
+  "Plugins": [
+    {
+      "Name": "UnrealRoboticsLab",
+      "Enabled": true
+    }
+  ]
+}

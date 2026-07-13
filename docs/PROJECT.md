@@ -15,6 +15,7 @@ OpenArm 2.0 retargeting pipeline. Generated datasets and audit artifacts live un
 | MuJoCo inspection | Complete | Fast geometry and segmentation reference. |
 | Robot removal | Accepted on the 1,026-frame fixture | RobotSeg/Grounding-DINO+SAM2, chunked ProPainter, and protected-object restoration. |
 | OpenArm rendering | Accepted on the fixture | Cycles is the reference; EEVEE Next is the production preset. |
+| Unreal/URLab rendering | Integration implemented, acceptance pending | UE 5.7, job-v2, synchronized RGB/depth/instance capture, cooked runtime, and resumable shards are opt-in until the full fixture passes. |
 | Style refinement | Accepted behind a hard gate | VACE may change robot RGB only; deterministic compositing is the fallback. |
 | Physical calibration | Requires hardware | Online priors cannot establish measured source-base and flange/TCP transforms. |
 
@@ -186,6 +187,48 @@ Gripper-object contact remains the hardest image region because pixels hidden by
 were never observed. Protected-object masks and depth are therefore release requirements, not
 optional polish.
 
+### Unreal/URLab candidate backend
+
+Blender remains the default and Cycles remains the oracle. The Unreal candidate is pinned to
+URLab `567cbd907a570b820beb87fbddd69c356a6d86da`; its typed bridge is pinned to the matching
+remote-stepping revision `bd3a63b15c6430b0b3738a0f5876554d5408644a`. Install Epic's precompiled
+UE 5.7 build (not a source checkout), then:
+
+```bash
+export UE_ROOT=/path/to/UnrealEngine-5.7
+scripts/setup_urlab.sh
+scripts/import_urlab_asset.sh       # one persistent 91 MB model import
+scripts/package_urlab.sh /new/runtime/path
+```
+
+Export, validate, render, and compare a v2 job:
+
+```bash
+uv run openarm-retarget urlab-job solved.npz outputs/job camera.json
+uv run openarm-retarget validate-urlab-job outputs/job/urlab_job.json
+uv run openarm-retarget render-urlab-batch outputs/job/urlab_job.json outputs/unreal \
+  --runtime /path/to/OpenArmRenderer --gpu-ids 0,1 --shard-frames 256 --warmup-frames 8
+uv run openarm-retarget render-urlab outputs/job/urlab_job.json outputs/unreal-audit \
+  --output-mode audit
+uv run openarm-retarget validate-urlab outputs/unreal-audit/rgba outputs/cycles \
+  --mujoco-rgba outputs/mujoco
+```
+
+Each cooked worker uses a distinct URLab step port; shard assignment is stable across resume.
+Every shard renders preceding warm-up frames and discards them, writes atomically, and records
+checksums, timing, synchronous frame IDs, settings, and failures. Instance segmentation is the
+only alpha source. Unreal centimetre depth is converted once to metres. Lens distortion remains
+a backend-independent post-process. Batch production output uses bounded writer queues and direct
+lossless FFmpeg streams (`rgba.mkv`, `instance.mkv`, and 16-bit millimetre `depth_mm.mkv`);
+`--output-mode audit` is the explicit PNG/NPZ path used by validators.
+
+Promotion requires static poses, 10 and 100 moving frames, the complete 1,026-frame fixture, one
+hour per source, and full retained data. Hard gates include mean silhouette IoU >= 0.95 with a
+strong p05, approximately one-pixel projection agreement, zero alpha/depth leakage, accepted
+metric depth tolerance, exact pose/frame synchronization, stable shard boundaries, bounded
+repeat renders, existing protected-object/composite audits, end-to-end throughput, and human
+review. Until all are recorded, `unreal-lumen` is experimental and Blender remains default.
+
 ## Executed acceptance
 
 All 397,198 input frames were converted and audited; 366,864 are feasible:
@@ -218,8 +261,8 @@ RGBA+depth run completed in 487.3 seconds. EEVEE would render the 397,198 sample
 Blender remains the accepted renderer: Cycles is the geometry oracle and EEVEE the fast path.
 SAPIEN 3.0.3 is the most credible future high-throughput backend: its complete disposable
 environment measured 389 MB and a simple 640x480 smoke scene reached 440 fps raster / 295 fps at
-8-spp ray tracing, but those are not OpenArm production numbers. Unreal/URLab remains optional
-because URLab has no cooked binary and needs a full editor once; Isaac Sim documents roughly
+8-spp ray tracing, but those are not OpenArm production numbers. Unreal/URLab now has a local
+cooked-runtime path but remains optional until the complete fixture passes; Isaac Sim documents roughly
 50 GB minimum storage. RoboTwin uses SAPIEN, so its large asset and policy stack is unnecessary.
 
 The visual architecture follows geometry-preserving embodiment work:

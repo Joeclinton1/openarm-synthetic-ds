@@ -52,7 +52,16 @@ from .raytrace import export_blender_scene, render_blender_batch, render_blender
 from .robotseg import segment_robotseg_video
 from .registration import auto_register_episode
 from .schema import Episode, SourceConfig
-from .urlab import export_urlab_job, render_urlab_job, urlab_doctor
+from .urlab import (
+    export_urlab_job,
+    import_urlab_asset,
+    prepare_urlab_asset,
+    render_urlab_batch,
+    render_urlab_job,
+    urlab_doctor,
+    validate_urlab_against_references,
+    validate_urlab_job,
+)
 from .viewer import TrajectoryViewer
 
 app = typer.Typer(no_args_is_help=True, help="Retarget robot datasets to OpenArm 2.0")
@@ -311,17 +320,59 @@ def render(
     camera_json: Path | None = None,
     width: int = 960,
     height: int = 720,
+    backend: str = typer.Option(
+        "mujoco", help="mujoco, blender-eevee, blender-cycles, or unreal-lumen"
+    ),
+    blender: Path = Path("blender"),
+    device: str = "CPU",
+    address: str = "tcp://localhost",
+    transport: str = "shm",
 ) -> None:
-    typer.echo(
-        TrajectoryViewer(model).render(
-            Episode.load(source),
-            output,
-            width=width,
-            height=height,
-            transparent_frames=transparent_frames,
-            depth_frames=depth_frames,
-            camera_json=camera_json,
+    episode = Episode.load(source)
+    backend = backend.lower()
+    if backend == "mujoco":
+        typer.echo(
+            TrajectoryViewer(model).render(
+                episode,
+                output,
+                width=width,
+                height=height,
+                transparent_frames=transparent_frames,
+                depth_frames=depth_frames,
+                camera_json=camera_json,
+            )
         )
+        return
+    if camera_json is None:
+        raise typer.BadParameter("--camera-json is required for calibrated backend rendering")
+    if backend in {"blender-eevee", "blender-cycles"}:
+        scene = export_blender_scene(
+            episode,
+            output / "scene",
+            model,
+            camera_json,
+            width,
+            height,
+            samples=0 if backend == "blender-eevee" else 32,
+        )
+        typer.echo(
+            render_blender_scene(
+                scene,
+                output / "frames",
+                blender,
+                device=device.upper(),
+                write_depth=depth_frames is not None,
+            )
+        )
+        return
+    if backend == "unreal-lumen":
+        job = export_urlab_job(
+            episode, output / "job", camera_json, model, width=width, height=height
+        )
+        typer.echo(render_urlab_job(job, output / "frames", address=address, transport=transport))
+        return
+    raise typer.BadParameter(
+        "backend must be mujoco, blender-eevee, blender-cycles, or unreal-lumen"
     )
 
 
@@ -394,8 +445,11 @@ def render_blender_batch_command(
 
 
 @app.command("urlab-doctor")
-def urlab_doctor_command(plugin: Path | None = None) -> None:
-    report = urlab_doctor(plugin)
+def urlab_doctor_command(
+    plugin: Path | None = None,
+    project: Path = Path("unreal/OpenArmRenderer/OpenArmRenderer.uproject"),
+) -> None:
+    report = urlab_doctor(plugin, project)
     typer.echo(json.dumps(report, indent=2))
     if not report["ok"]:
         raise typer.Exit(code=1)
@@ -424,14 +478,109 @@ def urlab_job(
     )
 
 
+@app.command("validate-urlab-job")
+def validate_urlab_job_command(job: Path) -> None:
+    typer.echo(json.dumps(validate_urlab_job(job), indent=2))
+
+
+@app.command("prepare-urlab-asset")
+def prepare_urlab_asset_command(
+    destination: Path = Path("data/assets/openarm_urlab"),
+    model: Path | None = None,
+) -> None:
+    typer.echo(prepare_urlab_asset(destination, model))
+
+
+@app.command("import-urlab-asset")
+def import_urlab_asset_command(
+    destination: Path = Path("data/assets/openarm_urlab"),
+    model: Path | None = None,
+    address: str = "tcp://localhost",
+) -> None:
+    typer.echo(json.dumps(import_urlab_asset(destination, model, address=address), indent=2))
+
+
 @app.command("render-urlab")
 def render_urlab(
     job: Path,
     output: Path,
     address: str = "tcp://localhost",
     transport: str = "shm",
+    step_port: int = 5559,
+    output_mode: str = "audit",
 ) -> None:
-    typer.echo(render_urlab_job(job, output, address=address, transport=transport))
+    typer.echo(
+        render_urlab_job(
+            job,
+            output,
+            address=address,
+            transport=transport,
+            step_port=step_port,
+            output_mode=output_mode,
+        )
+    )
+
+
+@app.command("render-urlab-batch")
+def render_urlab_batch_command(
+    job: Path,
+    output: Path,
+    gpu_ids: str = "0",
+    shard_frames: int = 256,
+    warmup_frames: int = 8,
+    resume: bool = True,
+    transport: str = "shm",
+    address: str = "tcp://localhost",
+    base_step_port: int = 5559,
+    runtime: Path | None = typer.Option(None, help="Cooked runtime; launches one process per GPU"),
+    startup_timeout_s: float = 120.0,
+    output_mode: str = "production",
+    writer_queue_size: int = 8,
+) -> None:
+    parsed_gpu_ids = tuple(int(value) for value in gpu_ids.split(",") if value.strip())
+    typer.echo(
+        render_urlab_batch(
+            job,
+            output,
+            gpu_ids=parsed_gpu_ids,
+            shard_frames=shard_frames,
+            warmup_frames=warmup_frames,
+            resume=resume,
+            transport=transport,
+            address=address,
+            base_step_port=base_step_port,
+            runtime=runtime,
+            startup_timeout_s=startup_timeout_s,
+            output_mode=output_mode,
+            writer_queue_size=writer_queue_size,
+        )
+    )
+
+
+@app.command("validate-urlab")
+def validate_urlab_command(
+    urlab_rgba: Path,
+    blender_rgba: Path,
+    mujoco_rgba: Path | None = None,
+    minimum_mean_iou: float = 0.95,
+    minimum_p05_iou: float = 0.90,
+    maximum_mean_boundary_error_px: float = 1.0,
+    output: Path | None = None,
+) -> None:
+    report = validate_urlab_against_references(
+        urlab_rgba,
+        blender_rgba,
+        mujoco_rgba,
+        minimum_mean_iou=minimum_mean_iou,
+        minimum_p05_iou=minimum_p05_iou,
+        maximum_mean_boundary_error_px=maximum_mean_boundary_error_px,
+    )
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, indent=2) + "\n")
+    typer.echo(json.dumps(report, indent=2))
+    if not report["ok"]:
+        raise typer.Exit(code=1)
 
 
 @app.command("agibot-camera")

@@ -27,3 +27,6 @@ uv run pytest
 The complete coordinate contract, dataset status, workflow, validation results, rendering
 benchmarks, and embodiment-transfer decisions are condensed into
 [docs/PROJECT.md](docs/PROJECT.md). Raw data and generated media are intentionally Git-ignored.
+The optional UE 5.7/URLab candidate backend lives in `unreal/OpenArmRenderer`; Blender remains
+the accepted default until Unreal passes the complete geometry, depth, synchronization, temporal,
+throughput, protected-object, and human-review gates documented there.

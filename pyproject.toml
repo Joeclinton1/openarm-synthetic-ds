@@ -24,6 +24,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "ruff>=0.11"]
+urlab = [
+  "urlab-bridge @ git+https://github.com/URLab-Sim/urlab_bridge.git@bd3a63b15c6430b0b3738a0f5876554d5408644a",
+]
 ros = ["mcap-ros2-support>=0.5"]
 media-ai = [
   "pillow>=11",
@@ -82,6 +85,9 @@ include = [
   "/uv.lock",
 ]
 exclude = ["/data", "/dist", "/outputs", "/vendor", "/.venv"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
