@@ -24,6 +24,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "ruff>=0.11"]
+official-ik = [
+  "openarm-control @ git+https://github.com/enactic/openarm_control.git@09c30d01f9bdc4945bcaa7e80e8d21795d74a79e",
+]
 urlab = [
   "urlab-bridge @ git+https://github.com/URLab-Sim/urlab_bridge.git@bd3a63b15c6430b0b3738a0f5876554d5408644a",
 ]

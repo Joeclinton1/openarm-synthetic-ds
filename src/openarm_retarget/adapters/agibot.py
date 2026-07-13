@@ -7,6 +7,8 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from ..gripper import aperture_to_closure, closure_to_aperture, preserve_pinch_center
+from ..poses import pose_to_matrix
 from ..schema import Episode, SourceConfig
 
 
@@ -35,13 +37,24 @@ def load_agibot_h5(
         axis=1,
     )
     gripper = raw_gripper[:, [1, 0]].astype(np.float64)
+    gripper_width_m = None
     if config.gripper_mode == "width_mm":
-        low = np.nanpercentile(gripper, 1, axis=0)
-        high = np.nanpercentile(gripper, 99, axis=0)
-        # Published state is finger opening in millimetres: larger is more open.
-        gripper = (high - gripper) / np.maximum(high - low, 1e-6)
+        gripper_width_m = gripper * 1e-3
+        gripper = aperture_to_closure(gripper_width_m)
+    elif config.gripper_mode == "closure_position":
+        if config.gripper_open_value is None or config.gripper_closed_value is None:
+            raise ValueError("closure_position requires gripper_open_value/gripper_closed_value")
+        span = config.gripper_closed_value - config.gripper_open_value
+        if abs(span) < 1e-9:
+            raise ValueError("gripper open and closed values must differ")
+        gripper = np.clip((gripper - config.gripper_open_value) / span, 0, 1)
+        gripper_width_m = closure_to_aperture(gripper)
     elif np.nanmax(gripper) > 1:
         gripper /= max(float(np.nanpercentile(gripper, 99)), 1e-6)
+    diagnostics = {}
+    if config.preserve_pinch_center:
+        offset = _source_pinch_offset_in_openarm_frame(config, gripper)
+        pose, diagnostics["pinch_center_target_m"] = preserve_pinch_center(pose, gripper, offset)
     episode = Episode(
         timestamp=timestamp,
         ee_pose=pose,
@@ -49,14 +62,46 @@ def load_agibot_h5(
         task=config.name,
         source_dataset=config.repo_id,
         source_episode=Path(path).parent.name,
+        gripper_width_m=gripper_width_m,
+        diagnostics=diagnostics,
         metadata={
             "calibrated": config.calibrated,
             "source_config": config.to_json(),
             "active_sides": ["right", "left"],
+            "pinch_center_compensated": config.preserve_pinch_center,
+            "gripper_calibration": "physical_width_m"
+            if gripper_width_m is not None
+            else "normalized_only",
         },
     )
     episode.validate()
     return episode
+
+
+def _source_pinch_offset_in_openarm_frame(
+    config: SourceConfig, gripper: np.ndarray
+) -> np.ndarray | None:
+    """Map source jaw midpoint travel into each OpenArm flange frame."""
+    if config.source_pinch_center_open_m is None or config.source_pinch_center_closed_m is None:
+        return None
+
+    def point(value: dict[str, list[float]] | list[float], side: str) -> np.ndarray:
+        selected = value[side] if isinstance(value, dict) else value
+        result = np.asarray(selected, dtype=np.float64)
+        if result.shape != (3,):
+            raise ValueError("source pinch centers must contain xyz triples")
+        return result
+
+    result = np.empty((*gripper.shape, 3), dtype=np.float64)
+    for side_index, side in enumerate(("right", "left")):
+        source_open = point(config.source_pinch_center_open_m, side)
+        source_closed = point(config.source_pinch_center_closed_m, side)
+        source_delta = (1 - gripper[:, side_index, None]) * (source_open - source_closed)
+        source_from_openarm = pose_to_matrix(
+            config.pose_transform(side).source_tool_from_openarm_tool
+        )
+        result[:, side_index] = source_delta @ source_from_openarm[:3, :3]
+    return result
 
 
 def load_agibot_lerobot_episode(
@@ -90,6 +135,9 @@ def load_agibot_lerobot_episode(
             "left" if source_index == 0 else "right"
         ).apply(raw)
         gripper[:, target_index] = np.clip(state[:, offset + 7], 0, 1)
+    diagnostics = {}
+    if config.preserve_pinch_center:
+        pose, diagnostics["pinch_center_target_m"] = preserve_pinch_center(pose, gripper)
     result = Episode(
         timestamp=timestamp,
         ee_pose=pose,
@@ -97,11 +145,14 @@ def load_agibot_lerobot_episode(
         task="AgiBot World Alpha derived fallback",
         source_dataset=config.repo_id,
         source_episode=str(episode_index),
+        diagnostics=diagnostics,
         metadata={
             "calibrated": config.calibrated,
             "source_config": config.to_json(),
             "active_sides": ["right", "left"],
             "provenance_warning": "accessible third-party conversion, not gated original",
+            "pinch_center_compensated": config.preserve_pinch_center,
+            "gripper_calibration": "normalized_only",
         },
     )
     result.validate()

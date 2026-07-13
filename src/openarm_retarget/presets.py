@@ -8,6 +8,7 @@ import pyarrow.parquet as pq
 from scipy.spatial.transform import Rotation
 
 from .constants import SIDES
+from .gripper import preserve_pinch_center
 from .ik import OpenArmIK
 from .schema import Episode, SourceConfig
 
@@ -42,6 +43,9 @@ def load_hiw_episode(
         poses[:, target] = config.pose_transform(side).apply(raw)
         # Published squeeze is at indices 20 and 22, already 0=open, 1=closed.
         gripper[:, target] = np.clip(wbc[:, 20 + 2 * source_index], 0, 1)
+    diagnostics = {}
+    if config.preserve_pinch_center:
+        poses, diagnostics["pinch_center_target_m"] = preserve_pinch_center(poses, gripper)
     result = Episode(
         timestamp=timestamp,
         ee_pose=poses,
@@ -49,10 +53,13 @@ def load_hiw_episode(
         task="HIW-500",
         source_dataset=config.repo_id,
         source_episode=str(episode_index),
+        diagnostics=diagnostics,
         metadata={
             "calibrated": config.calibrated,
             "source_config": config.to_json(),
             "active_sides": ["right", "left"],
+            "pinch_center_compensated": config.preserve_pinch_center,
+            "gripper_calibration": "normalized_only",
         },
     )
     result.validate()

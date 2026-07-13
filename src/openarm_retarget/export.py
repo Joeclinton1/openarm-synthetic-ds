@@ -8,6 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .constants import FPS, JOINT_NAMES, POSE_NAMES, SIDES
+from .gripper import closure_to_finger_qpos
 from .schema import Episode
 
 
@@ -21,11 +22,11 @@ def _joint_vector(episode: Episode) -> np.ndarray:
         raise ValueError("Episode has no OpenArm joint solution")
     n = len(episode.timestamp)
     result = np.empty((n, 16), dtype=np.float32)
+    fingers = closure_to_finger_qpos(episode.gripper)
     for side_index, side in enumerate(SIDES):
         output = side_index * 8
         result[:, output : output + 7] = episode.joint_position[:, side_index]
-        direction = -1.0 if side == "right" else 1.0
-        result[:, output + 7] = direction * np.clip(episode.gripper[:, side_index], 0, 1) * 0.7854
+        result[:, output + 7] = fingers[:, side_index * 2]
     return result
 
 

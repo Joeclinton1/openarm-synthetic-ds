@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .constants import SIDES
+from .gripper_validation import measure_gripper_contact
 from .ik import OpenArmIK
 from .schema import Episode
 
@@ -16,9 +17,12 @@ class FilterConfig:
     max_joint_velocity_rad_s: float = 3.0
     max_joint_acceleration_rad_s2: float = 20.0
     max_jacobian_condition: float = 500.0
+    minimum_joint_limit_margin_rad: float = 0.0
     reject_interarm_collision: bool = True
     reject_self_collision: bool = True
     minimum_run_frames: int = 6
+    max_pinch_center_error_m: float = 0.01
+    max_gripper_aperture_error_m: float = 1e-6
 
 
 def _remove_short_runs(mask: np.ndarray, minimum: int) -> np.ndarray:
@@ -71,6 +75,23 @@ def filter_episode(episode: Episode, ik: OpenArmIK, config: FilterConfig | None 
             <= cfg.max_joint_acceleration_rad_s2
         )
 
+    joint_limit_violation = np.zeros(n, dtype=bool)
+    for side_index in active:
+        limits = ik.limits(SIDES[side_index])
+        q = episode.joint_position[:, side_index]
+        joint_limit_violation |= np.any(
+            (q < limits[:, 0] + cfg.minimum_joint_limit_margin_rad)
+            | (q > limits[:, 1] - cfg.minimum_joint_limit_margin_rad),
+            axis=1,
+        )
+    feasible &= ~joint_limit_violation
+
+    contact = measure_gripper_contact(episode, ik.model_path)
+    pinch_error = np.asarray(contact["pinch_error_m"])
+    aperture_error = np.asarray(contact["aperture_error_m"])
+    feasible &= np.all(pinch_error[:, active] <= cfg.max_pinch_center_error_m, axis=1)
+    feasible &= np.all(aperture_error[:, active] <= cfg.max_gripper_aperture_error_m, axis=1)
+
     collision = np.zeros(n, dtype=bool)
     if cfg.reject_interarm_collision or cfg.reject_self_collision:
         for frame in range(n):
@@ -79,6 +100,7 @@ def filter_episode(episode: Episode, ik: OpenArmIK, config: FilterConfig | None 
                     episode.joint_position[frame, 0],
                     episode.joint_position[frame, 1],
                     include_self=cfg.reject_self_collision,
+                    gripper=episode.gripper[frame],
                 )
             )
         feasible &= ~collision
@@ -88,7 +110,10 @@ def filter_episode(episode: Episode, ik: OpenArmIK, config: FilterConfig | None 
         {
             "joint_velocity_rad_s": velocity,
             "joint_acceleration_rad_s2": acceleration,
+            "invalid_joint_limit": joint_limit_violation,
             "invalid_collision": collision,
+            "pinch_center_error_m": pinch_error,
+            "gripper_aperture_error_m": aperture_error,
         }
     )
     return episode

@@ -96,9 +96,7 @@ def test_urlab_grippers_expand_with_official_signs(openarm_model_path, tmp_path)
     job_path = export_urlab_job(episode, tmp_path / "job", camera, openarm_model_path)
     job = json.loads(job_path.read_text())
     with np.load(job["trajectory"], allow_pickle=False) as trajectory:
-        np.testing.assert_allclose(
-            trajectory["finger_qpos"][1], [-0.7854, -0.7854, 0.3927, 0.3927]
-        )
+        np.testing.assert_allclose(trajectory["finger_qpos"][1], [0.0, 0.0, 0.3927, 0.3927])
 
 
 def test_urlab_job_rejects_tampered_trajectory(openarm_model_path, tmp_path) -> None:

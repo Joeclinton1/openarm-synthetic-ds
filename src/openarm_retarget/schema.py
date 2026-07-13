@@ -23,6 +23,7 @@ class Episode:
     task: str
     source_dataset: str
     source_episode: str
+    gripper_width_m: np.ndarray | None = None  # [T, 2] physical pad separation when known
     joint_position: np.ndarray | None = None  # [T, 2, 7] after OpenArm IK
     feasible: np.ndarray | None = None
     diagnostics: dict[str, np.ndarray] = field(default_factory=dict)
@@ -37,6 +38,16 @@ class Episode:
             raise ValueError(f"ee_pose must be ({n}, 2, 7), got {self.ee_pose.shape}")
         if self.gripper.shape != (n, 2):
             raise ValueError(f"gripper must be ({n}, 2), got {self.gripper.shape}")
+        if not np.all(np.isfinite(self.gripper)) or np.any((self.gripper < 0) | (self.gripper > 1)):
+            raise ValueError("gripper must be finite normalized closure in [0,1]")
+        if self.gripper_width_m is not None:
+            self.gripper_width_m = np.asarray(self.gripper_width_m, dtype=np.float64)
+            if self.gripper_width_m.shape != (n, 2):
+                raise ValueError(
+                    f"gripper_width_m must be ({n}, 2), got {self.gripper_width_m.shape}"
+                )
+            if np.any(self.gripper_width_m < 0) or not np.all(np.isfinite(self.gripper_width_m)):
+                raise ValueError("gripper_width_m must be finite and non-negative")
         if n and (not np.all(np.isfinite(self.timestamp)) or np.any(np.diff(self.timestamp) <= 0)):
             raise ValueError("Timestamps must be finite and strictly increasing")
         for side_index in range(2):
@@ -72,6 +83,9 @@ class Episode:
             task=self.task,
             source_dataset=self.source_dataset,
             source_episode=self.source_episode,
+            gripper_width_m=(
+                self.gripper_width_m[selection].copy() if self.gripper_width_m is not None else None
+            ),
             joint_position=(
                 self.joint_position[selection].copy() if self.joint_position is not None else None
             ),
@@ -103,6 +117,8 @@ class Episode:
         }
         if self.joint_position is not None:
             arrays["joint_position"] = self.joint_position
+        if self.gripper_width_m is not None:
+            arrays["gripper_width_m"] = self.gripper_width_m
         if self.feasible is not None:
             arrays["feasible"] = self.feasible
         arrays.update({f"diagnostic_{k}": v for k, v in self.diagnostics.items()})
@@ -119,6 +135,7 @@ class Episode:
                 task=metadata.pop("task"),
                 source_dataset=metadata.pop("source_dataset"),
                 source_episode=metadata.pop("source_episode"),
+                gripper_width_m=data["gripper_width_m"] if "gripper_width_m" in data else None,
                 joint_position=data["joint_position"] if "joint_position" in data else None,
                 feasible=data["feasible"] if "feasible" in data else None,
                 diagnostics={
@@ -149,6 +166,11 @@ class SourceConfig:
     single_arm_side: str | None = None
     calibrated: bool = False
     gripper_mode: str = "normalized"
+    gripper_open_value: float | None = None
+    gripper_closed_value: float | None = None
+    source_pinch_center_open_m: dict[str, list[float]] | list[float] | None = None
+    source_pinch_center_closed_m: dict[str, list[float]] | list[float] | None = None
+    preserve_pinch_center: bool = False
     fields: dict[str, str] = field(default_factory=dict)
     tabletop_tasks: list[str] = field(default_factory=list)
     notes: str = ""

@@ -11,6 +11,7 @@ OpenArm 2.0 retargeting pipeline. Generated datasets and audit artifacts live un
 | Four one-hour samples | Complete | Selected whole episodes exceed 3,600 s per source. |
 | Cartesian conversion | Complete computationally | Poses use one shared OpenArm base frame and normalized `xyzw` quaternions. |
 | 7-DoF IK and filtering | Complete computationally | Limits, collision, residual, conditioning, velocity, and acceleration are audited. |
+| Gripper contact geometry | Complete computationally | One official-MJCF mapping drives MuJoCo, Blender, URLab, and export; physical pinch registration still inherits each source's calibration level. |
 | LeRobot v3 export | Complete | Feasible contiguous runs are exported without compressing invalid gaps. |
 | MuJoCo inspection | Complete | Fast geometry and segmentation reference. |
 | Robot removal | Accepted on the 1,026-frame fixture | RobotSeg/Grounding-DINO+SAM2, chunked ProPainter, and protected-object restoration. |
@@ -97,15 +98,27 @@ Output joints follow the official OpenArm order:
 right_joint1..7, right_gripper, left_joint1..7, left_gripper
 ```
 
-Normalized gripper state maps from `0=open, 1=closed` to right `0..-0.7854 rad` and left
-`0..+0.7854 rad`. Damped least squares solves weighted Cartesian position/orientation error.
+Normalized gripper state is `0=open, 1=closed`: open maps to right `-0.7854 rad` and left
+`+0.7854 rad`, while closed maps both sides to `0 rad`. This mapping is defined once and consumed
+by MuJoCo, Blender/EEVEE/Cycles, URLab, and LeRobot export. When a source publishes physical jaw
+width, it is retained in metres and inverted through the pinned OpenArm finger geometry rather
+than percentile-normalized per episode. OpenArm's rotating fingers move their pinch midpoint by
+up to 15.2 mm over the opening range, so pinch-centre-calibrated sources also receive a local
+EE-base compensation that keeps the intended pad midpoint fixed.
+
+Damped least squares solves weighted Cartesian position/orientation error.
 The redundant null space follows the constant-velocity prediction `2q[t-1]-q[t-2]` to reduce
 joint curvature; a smaller joint-centre objective avoids limits and warm starts retain the
 solution branch.
 
 Frames are rejected on Cartesian residual, Jacobian condition, joint limits, velocity,
-acceleration, or bimanual collision. Short feasible islands are removed. Export splits remaining
-contiguous runs into independent LeRobot episodes.
+acceleration, bimanual collision, fingertip aperture error, or pinch-midpoint error. Short
+feasible islands are removed. Export splits remaining contiguous runs into independent LeRobot
+episodes. Run the independent geometry gate with:
+
+```bash
+uv run openarm-retarget validate-gripper-contact solved.npz --output contact.json
+```
 
 ## Reproducible workflow
 
@@ -152,6 +165,23 @@ uv run openarm-retarget solve canonical.npz solved.npz
 uv run openarm-retarget render solved.npz preview.mp4
 uv run openarm-retarget export solved.npz converted_dataset/
 ```
+
+The published Dora/OpenArm MuJoCo+Mink IK remains an opt-in comparison backend. Its Dora
+interface and `openarm-control` implementation are pinned independently. Generate quantitative
+results and synchronized human-review videos without replacing the production solver:
+
+```bash
+uv sync --extra dev --extra official-ik
+uv run openarm-retarget compare-ik canonical.npz outputs/ik-review
+```
+
+`compare-ik` uses the official solver's published costs and DAQP backend, with 80 iterations per
+offline frame and bounded repeated-target warm-up matching Dora's live control cadence. Both
+outputs receive the same feasibility gates. Mink output is intentionally left unsmoothed: it can
+ride a model joint limit, and the current DLS smoother's inward limit margin changes that valid
+redundant solution's tool orientation. On a headless host, set `MUJOCO_GL=egl` when generating
+review videos.
+Removal of the current solver requires complete cross-dataset validation, not a single fixture.
 
 For inspection only, `convert-episode --allow-uncalibrated` followed by `fit-workspace` creates a
 reproducible bootstrap; it is never promoted to measured calibration.
@@ -248,8 +278,35 @@ The full visual fixture is AgiBot episode `649684` at 1,026 frames and 640x480:
 | ProPainter | 159.7 s including extraction/stitching; chunk boundaries below normal p95 frame change. |
 | Cycles geometry | 0.9723 mean / 0.9477 p05 MuJoCo coverage agreement; zero depth leakage. |
 | EEVEE geometry | 0.9595 mean IoU against Cycles; deterministic decoded pixels. |
+| Gripper contact geometry (corrected replay) | 1,018/1,026 retained frames; 6.91 mm p95 / 9.73 mm maximum pinch-midpoint error; physical jaw aperture error below 1.3e-16 m. |
 | Deterministic composite | 0.00836 outside-region MAE; 0.00821 protected-object MAE. |
 | VACE refinement | 0.9057 independent RobotSeg IoU; 0.00837 background MAE; 0.00800 protected-object MAE; 0.0839 px flow error. |
+
+The corrected gripper replay uses AgiBot's source-reported millimetre opening and the fixture's
+existing automatic workspace registration. It proves internal kinematic/render consistency, not
+physical source-to-OpenArm metrology; that registration remains explicitly unvalidated. Eight
+frames over the hard 10 mm contact limit are now rejected instead of being rendered silently.
+The same corrected replay through the pinned official Mink option retained 751 frames and passed
+the contact gate at 1.40 mm p95 / 2.87 mm maximum; its previously documented joint-limit and
+temporal failures still prevent it replacing the current solver.
+
+The pinned published Dora/OpenArm Mink IK was also run on all 1,026 fixture frames with its
+released DAQP costs, 80 offline iterations, and bounded first-target warm-up:
+
+| IK result | Current DLS | Official Mink |
+|---|---:|---:|
+| Feasible frames | 100.00% | 73.68% |
+| Mean / maximum position error | 2.973 / 4.809 mm | 0.842 / 3.828 mm |
+| Maximum orientation error | 0.06465 rad | 0.000252 rad |
+| Maximum joint acceleration | 9.37 rad/s² | 38.82 rad/s² |
+| Joint-limit violation frames | 0 | 262 |
+| Solve throughput | 750 fps | 43 fps |
+
+Mink is more Cartesian-accurate, but `openarm-control` 0.1.0 retries an infeasible constrained QP
+without configuration limits. On this fixture that drives the left wrist up to 0.170 rad outside
+the audited model range. The current solver remains the production implementation; the official
+solver is retained only as a pinned comparison backend until upstream limit handling and temporal
+gates pass.
 
 At 640x480, EEVEE Next/16 samples measured 9.99 output fps; two-process EEVEE was slower.
 Cycles/8 samples with two OptiX workers measured about 2.01 fps. The corrected full Cycles

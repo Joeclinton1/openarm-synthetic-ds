@@ -9,6 +9,7 @@ import mujoco
 import numpy as np
 
 from .constants import ARM_JOINT_NAMES, SIDES
+from .gripper import closure_to_finger_qpos, finger_qpos_addresses
 from .model import resolve_model
 from .schema import Episode
 
@@ -25,12 +26,14 @@ class TrajectoryViewer:
                 for name in ARM_JOINT_NAMES[side]
             ]
             self.qpos[side] = self.model.jnt_qposadr[ids]
+        self.finger_qpos = finger_qpos_addresses(self.model)
 
     def set_frame(self, episode: Episode, frame: int) -> None:
         if episode.joint_position is None:
             raise ValueError("Viewer requires an IK-solved episode")
         for side_index, side in enumerate(SIDES):
             self.data.qpos[self.qpos[side]] = episode.joint_position[frame, side_index]
+        self.data.qpos[self.finger_qpos] = closure_to_finger_qpos(episode.gripper[frame])
         mujoco.mj_forward(self.model, self.data)
 
     def interactive(self, episode: Episode, realtime: bool = True) -> None:

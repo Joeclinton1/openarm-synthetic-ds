@@ -9,6 +9,8 @@ The target pose is always the origin of `openarm_{right,left}_ee_base_link` rela
 root of the official OpenArm 2.0 bimanual MuJoCo model. Positions are metres and quaternions
 are `xyzw`. Exported joint vectors match the official OpenArm dataset ordering:
 right joints 1-7, right gripper, left joints 1-7, left gripper.
+Canonical gripper values are `0=open, 1=closed`; the physical fingertip aperture and moving
+pinch midpoint are validated from the pinned official MJCF for every accepted frame.
 
 Automatic conversions use one shared source-to-OpenArm base transform for both arms. They are
 fully reproducible and suitable for inspection/training experiments, but remain explicitly

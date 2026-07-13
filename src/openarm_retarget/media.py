@@ -1332,7 +1332,10 @@ def distort_rgba_frames(
     output_dir: str | Path,
 ) -> Path:
     """Map ideal pinhole RGBA renders into a source camera's plumb-bob image coordinates."""
-    camera = json.loads(Path(camera_json).read_text())
+    camera_payload = json.loads(Path(camera_json).read_text())
+    # Blender scene manifests embed the complete source-camera payload. Accept
+    # either that reproducible manifest or a standalone camera JSON.
+    camera = camera_payload.get("camera", camera_payload)
     intrinsics = np.asarray(camera["intrinsics"], dtype=np.float64)
     distortion = np.asarray(camera.get("distortion", []), dtype=np.float64)
     if intrinsics.shape != (3, 3) or distortion.shape not in ((0,), (4,), (5,), (8,)):

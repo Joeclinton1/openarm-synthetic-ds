@@ -12,6 +12,7 @@ import mujoco
 import numpy as np
 
 from .constants import ARM_JOINT_NAMES, OPENARM_MUJOCO_COMMIT, SIDES
+from .gripper import closure_to_finger_qpos, finger_qpos_addresses
 from .model import resolve_model
 from .schema import Episode
 
@@ -114,6 +115,7 @@ def export_blender_scene(
             for name in ARM_JOINT_NAMES[side]
         ]
         qpos[side] = model.jnt_qposadr[joint_ids]
+    finger_qpos = finger_qpos_addresses(model)
 
     visual_geoms = [
         geom_id
@@ -145,6 +147,7 @@ def export_blender_scene(
     for frame in range(frame_count):
         for side_index, side in enumerate(SIDES):
             data.qpos[qpos[side]] = episode.joint_position[frame, side_index]
+        data.qpos[finger_qpos] = closure_to_finger_qpos(episode.gripper[frame])
         mujoco.mj_forward(model, data)
         for item in objects:
             geom_id = item["geom_id"]
@@ -179,6 +182,18 @@ def export_blender_scene(
         "eevee_samples": eevee_samples if samples == 0 else None,
         "png_compression": png_compression,
         "transparent_background": True,
+        "gripper": {
+            "semantics": "normalized 0=open, 1=closed",
+            "finger_joint_order": [
+                "openarm_right_finger_joint1",
+                "openarm_right_finger_joint2",
+                "openarm_left_finger_joint1",
+                "openarm_left_finger_joint2",
+            ],
+            "pinch_center_compensated": bool(
+                episode.metadata.get("pinch_center_compensated", False)
+            ),
+        },
         "lighting": {
             "world_color_linear": [0.12, 0.12, 0.12, 1.0],
             "world_strength": 0.35,

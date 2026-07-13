@@ -56,3 +56,27 @@ def test_episode_recovers_after_unreachable_prefix(openarm_model_path) -> None:
     )
     solver.solve_episode(episode)
     assert episode.diagnostics["ik_raw_success"][2:, 0].all()
+
+
+def test_filter_rejects_joint_limit_violation(openarm_model_path) -> None:
+    from openarm_retarget.filters import filter_episode
+    from openarm_retarget.schema import Episode
+
+    solver = OpenArmIK(openarm_model_path)
+    poses = np.zeros((3, 2, 7))
+    poses[..., 6] = 1
+    for side_index, side in enumerate(("right", "left")):
+        poses[:, side_index] = solver.forward_pose(side, solver.neutral(side))
+    episode = Episode(
+        timestamp=np.arange(3) / 30,
+        ee_pose=poses,
+        gripper=np.zeros((3, 2)),
+        task="joint limit",
+        source_dataset="test",
+        source_episode="0",
+    )
+    solver.solve_episode(episode)
+    episode.joint_position[1, 0, 0] = solver.limits("right")[0, 1] + 0.1
+    filter_episode(episode, solver)
+    assert episode.diagnostics["invalid_joint_limit"][1]
+    assert not episode.feasible[1]

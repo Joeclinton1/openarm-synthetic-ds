@@ -8,6 +8,7 @@ import numpy as np
 from scipy.sparse import diags
 from scipy.sparse.linalg import spsolve
 from .constants import ARM_JOINT_NAMES, EE_SITE_NAMES, SIDES
+from .gripper import closure_to_finger_qpos, finger_qpos_addresses
 from .model import resolve_model
 from .poses import normalize_quaternion_xyzw, orientation_error
 from .schema import Episode
@@ -57,6 +58,7 @@ class OpenArmIK:
         self._dofs: dict[str, np.ndarray] = {}
         self._limits: dict[str, np.ndarray] = {}
         self._sites: dict[str, int] = {}
+        self._finger_qpos = finger_qpos_addresses(self.model)
         for side in SIDES:
             ids = np.array(
                 [
@@ -315,10 +317,16 @@ class OpenArmIK:
         return episode
 
     def arm_collisions(
-        self, right_q: np.ndarray, left_q: np.ndarray, include_self: bool = True
+        self,
+        right_q: np.ndarray,
+        left_q: np.ndarray,
+        include_self: bool = True,
+        gripper: np.ndarray | None = None,
     ) -> list[tuple[str, str]]:
         self.set_arm("right", right_q)
         self.set_arm("left", left_q)
+        if gripper is not None:
+            self.data.qpos[self._finger_qpos] = closure_to_finger_qpos(gripper)
         mujoco.mj_forward(self.model, self.data)
         contacts: list[tuple[str, str]] = []
         for contact in self.data.contact:

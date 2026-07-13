@@ -6,16 +6,24 @@ rotation_representation: quaternion
 quaternion_order: xyzw
 position_scale: 1.0
 arm_order: [left, right]
-# CAD-derived G1_120s flange retarget prior. It aligns each gripper's published center
-# (+0.100 m along its outward axis) with the OpenArm v2 neutral fingertip contact center
-# (-0.16334 m along flange z, with the outward-axis flip). This is exact geometry from
-# the cited models, but remains unvalidated until the dataset flange name is metrologically
-# confirmed against the physical robot.
+# G1_120s flange-to-pad calibration. The source's fixed center_link is only 0.100 m
+# from the flange and is not the finger contact point. These transforms align the
+# actual closed pad midpoint, approximately 0.254 m from the published flange,
+# with the OpenArm v2 pad midpoint. Image reprojection remains marked uncalibrated.
 source_tool_from_openarm_tool:
-  right: [0.0, 0.0014, -0.06334, 0.7071067811865476, 0.7071067811865476, 0.0, 0.0]
-  left: [0.0, -0.0014, -0.06334, 0.7071067811865476, -0.7071067811865476, 0.0, 0.0]
+  right: [-0.00490702, 0.01949323, 0.09114635, 0.7071067811865476, 0.7071067811865476, 0.0, 0.0]
+  left: [0.00490702, -0.01949323, 0.09114635, 0.7071067811865476, -0.7071067811865476, 0.0, 0.0]
+source_pinch_center_open_m:
+  right: [-0.008067, 0.011713, 0.236352]
+  left: [0.008067, -0.011713, 0.236352]
+source_pinch_center_closed_m:
+  right: [-0.00490702, 0.01806323, 0.25448635]
+  left: [0.00490702, -0.01806323, 0.25448635]
 calibrated: false
-gripper_mode: width_mm
+gripper_mode: closure_position
+gripper_open_value: 34.7
+gripper_closed_value: 117.3
+preserve_pinch_center: true
 fields:
   timestamp: /timestamp
   position: /state/end/position
@@ -24,5 +32,6 @@ fields:
 tabletop_tasks: [pick, place, sort, arrange]
 notes: >-
   Original repository is gated. Published pose is the robot flange, left then right, in
-  metres with xyzw quaternion. The configured flange prior is CAD-derived from the official
-  GenieSim G1_120s gripper and pinned OpenArm v2 meshes; base/camera metrology is still required.
+  metres with xyzw quaternion. Gripper position increases from open to closed; it is not a
+  physical aperture. The pad calibration uses the official GenieSim G1_120s linkage plus
+  source-image reprojection; base/camera metrology is still required.

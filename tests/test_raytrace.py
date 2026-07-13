@@ -1,10 +1,12 @@
 import json
 
+import mujoco
 import numpy as np
 
 from openarm_retarget.ik import OpenArmIK
 from openarm_retarget.raytrace import _frame_ranges, export_blender_scene, render_blender_batch
 from openarm_retarget.schema import Episode
+from openarm_retarget.viewer import TrajectoryViewer
 
 
 def test_blender_scene_contains_official_meshes_and_motion(tmp_path, openarm_model_path) -> None:
@@ -16,7 +18,7 @@ def test_blender_scene_contains_official_meshes_and_motion(tmp_path, openarm_mod
     episode = Episode(
         timestamp=np.array([0.0, 1 / 30]),
         ee_pose=np.zeros((2, 2, 7)),
-        gripper=np.zeros((2, 2)),
+        gripper=np.array([[0.0, 0.0], [1.0, 1.0]]),
         task="ray trace test",
         source_dataset="test",
         source_episode="0",
@@ -36,6 +38,19 @@ def test_blender_scene_contains_official_meshes_and_motion(tmp_path, openarm_mod
     right_link = next(item for item in payload["objects"] if item["name"] == "link3_right_00")
     assert right_link["material"]["color_space"] == "sRGB"
     assert right_link["world_from_object_frames"][0] != right_link["world_from_object_frames"][1]
+    left_finger = next(
+        item for item in payload["objects"] if item["name"] == "finger_inner_left_00"
+    )
+    assert left_finger["world_from_object_frames"][0] != left_finger["world_from_object_frames"][1]
+    assert payload["gripper"]["semantics"] == "normalized 0=open, 1=closed"
+    viewer = TrajectoryViewer(openarm_model_path)
+    geom_id = mujoco.mj_name2id(viewer.model, mujoco.mjtObj.mjOBJ_GEOM, "finger_inner_left_00")
+    for frame in range(2):
+        viewer.set_frame(episode, frame)
+        transform = np.eye(4)
+        transform[:3, :3] = viewer.data.geom_xmat[geom_id].reshape(3, 3)
+        transform[:3, 3] = viewer.data.geom_xpos[geom_id]
+        np.testing.assert_allclose(left_finger["world_from_object_frames"][frame], transform)
 
 
 def test_blender_scene_supports_eevee(tmp_path, openarm_model_path) -> None:

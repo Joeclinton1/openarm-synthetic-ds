@@ -4,6 +4,14 @@ OPENARM_MUJOCO_REPO = "https://github.com/enactic/openarm_mujoco.git"
 OPENARM_MUJOCO_COMMIT = "9eadf86d5b9a0713fdc097019302e02e4b303083"
 OPENARM_MODEL_RELATIVE = "v2/openarm_bimanual.xml"
 
+# dora-openarm-kinematics 0.1.1 is the published Dora transport wrapper. Its
+# actual MuJoCo/Mink solver lives in openarm-control 0.1.0, pinned separately so
+# comparisons cannot silently change when either upstream repository advances.
+DORA_OPENARM_KINEMATICS_REPO = "https://github.com/enactic/dora-openarm-kinematics.git"
+DORA_OPENARM_KINEMATICS_COMMIT = "ed4ba6446b1d59fa020d00adfd5b206d38d227fe"
+OPENARM_CONTROL_REPO = "https://github.com/enactic/openarm_control.git"
+OPENARM_CONTROL_COMMIT = "09c30d01f9bdc4945bcaa7e80e8d21795d74a79e"
+
 # URLab is intentionally pinned independently of the OpenArm model.  The plugin
 # and its Python bridge do not publish binary releases yet, so reproducible
 # source revisions are part of every render manifest.
@@ -27,8 +35,7 @@ JOINT_NAMES = [
 
 ARM_JOINT_NAMES = {side: [f"openarm_{side}_joint{i}" for i in range(1, 8)] for side in SIDES}
 FINGER_JOINT_NAMES = {
-    side: [f"openarm_{side}_finger_joint1", f"openarm_{side}_finger_joint2"]
-    for side in SIDES
+    side: [f"openarm_{side}_finger_joint1", f"openarm_{side}_finger_joint2"] for side in SIDES
 }
 EE_SITE_NAMES = {side: f"{side}_ee_control_point" for side in SIDES}
 EE_BODY_NAMES = {side: f"openarm_{side}_ee_base_link" for side in SIDES}

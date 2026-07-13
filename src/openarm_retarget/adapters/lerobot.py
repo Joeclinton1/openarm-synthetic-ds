@@ -8,6 +8,7 @@ import pyarrow.parquet as pq
 from scipy.spatial.transform import Rotation
 
 from ..constants import SIDES
+from ..gripper import preserve_pinch_center
 from ..ik import OpenArmIK
 from ..poses import convert_quaternion_order
 from ..schema import Episode, SourceConfig
@@ -99,6 +100,9 @@ def load_lerobot_episode(
                     grippers[:, SIDES.index(side)] = _gripper(
                         values[:, source_index * width : (source_index + 1) * width], config
                     )
+    diagnostics = {}
+    if config.preserve_pinch_center:
+        poses, diagnostics["pinch_center_target_m"] = preserve_pinch_center(poses, grippers)
     episode = Episode(
         timestamp=timestamp,
         ee_pose=poses,
@@ -106,10 +110,13 @@ def load_lerobot_episode(
         task=config.name,
         source_dataset=config.repo_id,
         source_episode=str(episode_index),
+        diagnostics=diagnostics,
         metadata={
             "calibrated": config.calibrated,
             "source_config": config.to_json(),
             "active_sides": [config.single_arm_side] if config.single_arm_side else list(SIDES),
+            "pinch_center_compensated": config.preserve_pinch_center,
+            "gripper_calibration": "normalized_only",
         },
     )
     episode.validate()

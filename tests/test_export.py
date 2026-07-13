@@ -33,7 +33,7 @@ def test_export_openarm_order_and_gripper_sign(tmp_path) -> None:
     assert table.num_rows == 3
     first = np.asarray(table["action"][0].as_py())
     np.testing.assert_array_equal(first[:7], np.arange(7))
-    assert np.isclose(first[7], -0.7854)
+    assert np.isclose(first[7], 0.0)
     np.testing.assert_array_equal(first[8:15], np.arange(10, 17))
     assert np.isclose(first[15], 0.3927)
     info = json.loads((tmp_path / "meta/info.json").read_text())

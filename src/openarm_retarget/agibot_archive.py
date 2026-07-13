@@ -4,6 +4,7 @@ import json
 import os
 import re
 import tarfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -253,7 +254,16 @@ def convert_agibot_hour(
             h5 = source_root / (
                 f"proprio_stats/{manifest['task_id']}/{episode_index}/proprio_stats.h5"
             )
-            raw = load_agibot_h5(h5, config, allow_uncalibrated=True)
+            # Registration must receive flange poses in the untouched source
+            # frame. Otherwise the configured base/tool priors are baked in at
+            # load time and then applied again by apply_registration.
+            raw_config = replace(
+                config,
+                openarm_from_source_base=None,
+                source_tool_from_openarm_tool=None,
+                preserve_pinch_center=False,
+            )
+            raw = load_agibot_h5(h5, raw_config, allow_uncalibrated=True)
             raw.task = item["task"]
             raw.source_episode = str(episode_index)
             registration = auto_register_episode(

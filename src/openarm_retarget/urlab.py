@@ -29,6 +29,7 @@ from .constants import (
     URLAB_COMMIT,
     URLAB_MODEL_ID,
 )
+from .gripper import aperture_to_closure, closure_to_finger_qpos
 from .model import resolve_model
 from .schema import Episode
 
@@ -108,10 +109,7 @@ def _validate_intrinsics(intrinsics: np.ndarray) -> None:
 
 def _gripper_qpos(gripper: np.ndarray) -> np.ndarray:
     """Expand normalized right/left closure to both coupled finger joints."""
-    values = np.clip(np.asarray(gripper, dtype=np.float64), 0.0, 1.0)
-    right = -values[:, 0:1] * 0.7854
-    left = values[:, 1:2] * 0.7854
-    return np.concatenate([right, right, left, left], axis=1)
+    return closure_to_finger_qpos(gripper)
 
 
 def export_urlab_job(
@@ -180,6 +178,11 @@ def export_urlab_job(
         timestamp=np.asarray(episode.timestamp[:frame_count], dtype=np.float64),
         arm_qpos=arm_qpos,
         gripper_normalized=np.asarray(episode.gripper[:frame_count], dtype=np.float64),
+        **(
+            {"gripper_width_m": np.asarray(episode.gripper_width_m[:frame_count])}
+            if episode.gripper_width_m is not None
+            else {}
+        ),
         finger_qpos=finger_qpos,
         world_from_camera=world_from_camera,
         # Retained for the current URLab mocap API and v1 reader compatibility.
@@ -222,6 +225,10 @@ def export_urlab_job(
             "finger_joint_order": [
                 name for side in SIDES for name in FINGER_JOINT_NAMES[side]
             ],
+            "gripper_semantics": "normalized 0=open, 1=closed",
+            "pinch_center_compensated": bool(
+                episode.metadata.get("pinch_center_compensated", False)
+            ),
         },
         "camera": {
             "convention": "opencv-world-from-camera",
@@ -313,6 +320,8 @@ def validate_urlab_job(job_path: str | Path) -> dict[str, Any]:
         raise ValueError("URLab arm joint ordering differs from the OpenArm contract")
     if trajectory_spec.get("finger_joint_order") != expected_fingers:
         raise ValueError("URLab finger joint ordering differs from the OpenArm contract")
+    if trajectory_spec.get("gripper_semantics") != "normalized 0=open, 1=closed":
+        raise ValueError("URLab gripper semantics differ from the OpenArm contract")
 
     frames = int(trajectory_spec["frames"])
     with np.load(trajectory_path, allow_pickle=False) as trajectory:
@@ -334,6 +343,24 @@ def validate_urlab_job(job_path: str | Path) -> dict[str, Any]:
             raise ValueError("Trajectory timestamps must be strictly increasing")
         if np.any((trajectory["gripper_normalized"] < 0) | (trajectory["gripper_normalized"] > 1)):
             raise ValueError("Normalized gripper values must be in [0,1]")
+        if not np.allclose(
+            trajectory["finger_qpos"],
+            closure_to_finger_qpos(trajectory["gripper_normalized"]),
+            atol=1e-12,
+            rtol=0,
+        ):
+            raise ValueError("Finger qpos does not match normalized gripper closure")
+        if "gripper_width_m" in trajectory:
+            width_m = trajectory["gripper_width_m"]
+            if width_m.shape != (frames, 2) or not np.all(np.isfinite(width_m)):
+                raise ValueError("Physical gripper width must be finite with shape [frames,2]")
+            if np.any(width_m < 0) or not np.allclose(
+                trajectory["gripper_normalized"],
+                aperture_to_closure(width_m),
+                atol=1e-12,
+                rtol=0,
+            ):
+                raise ValueError("Physical gripper width disagrees with normalized closure")
         _validate_rigid_transforms(trajectory["world_from_camera"])
 
     intrinsics = np.asarray(job["camera"]["intrinsics"], dtype=np.float64)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -59,7 +60,16 @@ def convert_lerobot_hour(
         else:
             solved = None
         if solved is None:
-            raw = _load_episode(table, config, episode_index)
+            # Auto-registration owns both source-to-OpenArm transforms. Loading
+            # with them enabled would bake them into the poses and apply them a
+            # second time in apply_registration below.
+            raw_config = replace(
+                config,
+                openarm_from_source_base=None,
+                source_tool_from_openarm_tool=None,
+                preserve_pinch_center=False,
+            )
+            raw = _load_episode(table, raw_config, episode_index)
             registration = auto_register_episode(
                 raw,
                 model_path,

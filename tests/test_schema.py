@@ -17,11 +17,14 @@ def make_episode() -> Episode:
 
 
 def test_episode_roundtrip(tmp_path) -> None:
+    episode = make_episode()
+    episode.gripper_width_m = np.full((3, 2), 0.04)
     path = tmp_path / "episode.npz"
-    make_episode().save(path)
+    episode.save(path)
     loaded = Episode.load(path)
     assert loaded.task == "test"
     np.testing.assert_array_equal(loaded.timestamp, [0.0, 0.1, 0.2])
+    np.testing.assert_allclose(loaded.gripper_width_m, 0.04)
 
 
 def test_rejects_nonmonotonic_timestamp() -> None:
@@ -36,9 +39,12 @@ def test_rejects_nonmonotonic_timestamp() -> None:
 
 
 def test_slice_resets_time() -> None:
-    sliced = make_episode().sliced(1, 3)
+    episode = make_episode()
+    episode.gripper_width_m = np.full((3, 2), 0.04)
+    sliced = episode.sliced(1, 3)
     np.testing.assert_allclose(sliced.timestamp, [0, 0.1])
     assert sliced.metadata["source_frame_slice"] == [1, 3]
+    assert sliced.gripper_width_m.shape == (2, 2)
 
 
 def test_source_config_selects_per_side_tool_transform() -> None:

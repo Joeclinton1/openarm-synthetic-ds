@@ -22,6 +22,8 @@ from .download import download_lerobot_hour, plan_lerobot_hour, probe_repo, veri
 from .export import export_lerobot_v3, validate_lerobot_v3
 from .filters import filter_episode
 from .ik import OpenArmIK
+from .gripper_validation import validate_gripper_contact
+from .ik_compare import compare_ik_episode, package_ik_review_videos
 from .media import (
     apply_mask_constrained_style,
     apply_mask_constrained_style_batch,
@@ -47,6 +49,7 @@ from .media import (
     write_render_manifest,
 )
 from .model import fetch_openarm_model
+from .official_ik import OfficialIKConfig
 from .presets import fit_workspace_translation, load_hiw_episode
 from .raytrace import export_blender_scene, render_blender_batch, render_blender_scene
 from .robotseg import segment_robotseg_video
@@ -305,9 +308,85 @@ def solve(source: Path, output: Path, model: Path | None = None, apply_filter: b
     typer.echo(f"{output}: {feasible}/{len(episode.timestamp)} feasible frames")
 
 
+@app.command("compare-ik")
+def compare_ik(
+    source: Path,
+    destination: Path,
+    model: Path | None = None,
+    max_iterations: int = 80,
+    render: bool = True,
+    width: int = 640,
+    height: int = 480,
+    contact_start: int = 560,
+    contact_end: int = 770,
+) -> None:
+    """Compare current DLS IK with pinned official Dora/OpenArm Mink IK."""
+    report = compare_ik_episode(
+        source,
+        destination,
+        model,
+        official_config=OfficialIKConfig(max_iterations=max_iterations),
+        render=render,
+        width=width,
+        height=height,
+        contact_start=contact_start,
+        contact_end=contact_end,
+    )
+    typer.echo(json.dumps(report, indent=2))
+
+
+@app.command("package-ik-review")
+def package_ik_review(
+    current_video: Path,
+    official_video: Path,
+    destination: Path,
+    source_video: Path | None = None,
+    removed_video: Path | None = None,
+    contact_start: int = 560,
+    contact_end: int = 770,
+) -> None:
+    """Build synchronized two- or four-column IK human-review videos."""
+    typer.echo(
+        json.dumps(
+            package_ik_review_videos(
+                current_video,
+                official_video,
+                destination,
+                source_video=source_video,
+                removed_video=removed_video,
+                contact_start=contact_start,
+                contact_end=contact_end,
+            ),
+            indent=2,
+        )
+    )
+
+
 @app.command("view")
 def view(source: Path, model: Path | None = None, realtime: bool = True) -> None:
     TrajectoryViewer(model).interactive(Episode.load(source), realtime)
+
+
+@app.command("validate-gripper-contact")
+def validate_gripper_contact_command(
+    source: Path,
+    output: Path | None = None,
+    model: Path | None = None,
+    maximum_pinch_error_m: float = 0.01,
+    maximum_aperture_error_m: float = 1e-6,
+) -> None:
+    report = validate_gripper_contact(
+        Episode.load(source),
+        model,
+        maximum_pinch_error_m=maximum_pinch_error_m,
+        maximum_aperture_error_m=maximum_aperture_error_m,
+    )
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, indent=2) + "\n")
+    typer.echo(json.dumps(report, indent=2))
+    if not report["ok"]:
+        raise typer.Exit(code=1)
 
 
 @app.command("render")
