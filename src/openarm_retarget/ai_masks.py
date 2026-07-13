@@ -173,6 +173,45 @@ def carry_object_box(
     return [x1, y1, x1 + box_width, y1 + box_height]
 
 
+def carry_robot_boxes(
+    mask: np.ndarray,
+    width: int,
+    height: int,
+    *,
+    expected_arms: int = 2,
+    expansion_fraction: float = 0.18,
+    minimum_area_fraction: float = 0.002,
+) -> list[list[float]] | None:
+    """Carry edge-connected robot tracks across bounded-memory chunk boundaries."""
+    binary = np.asarray(mask, dtype=np.uint8)
+    if binary.shape != (height, width):
+        raise ValueError("Robot mask resolution does not match the video")
+    count, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    minimum_area = width * height * minimum_area_fraction
+    candidates: list[tuple[int, list[float]]] = []
+    for component in range(1, count):
+        x, y, box_width, box_height, area = stats[component]
+        touches_edge = x == 0 or y == 0 or x + box_width == width or y + box_height == height
+        if area < minimum_area or not touches_edge:
+            continue
+        dx = box_width * expansion_fraction
+        dy = box_height * expansion_fraction
+        candidates.append(
+            (
+                int(area),
+                [
+                    max(0.0, x - dx),
+                    max(0.0, y - dy),
+                    min(float(width), x + box_width + dx),
+                    min(float(height), y + box_height + dy),
+                ],
+            )
+        )
+    if not candidates:
+        return None
+    return [box for _, box in sorted(candidates, reverse=True)[:expected_arms]]
+
+
 def _read_video_chunks(
     video_path: str | Path,
     width: int,
@@ -240,6 +279,7 @@ def segment_robot_video(
     selection: str = "robot",
     max_objects: int = 1,
     seed_box: list[float] | None = None,
+    carry_robot_across_chunks: bool = True,
 ) -> Path:
     """Detect robot arms and track their masks with SAM2 in bounded-memory chunks.
 
@@ -275,6 +315,7 @@ def segment_robot_video(
     chunks: list[dict[str, Any]] = []
     global_index = 0
     carry_box = seed_box
+    carry_boxes: list[list[float]] | None = None
     initial_object_extent: tuple[float, float] | None = None
     capture.release()
     try:
@@ -282,13 +323,16 @@ def segment_robot_video(
             _read_video_chunks(video_path, width, height, chunk_frames, max_frames)
         ):
             pil_frames = [Image.fromarray(frame) for frame in frames]
+            use_carried_robot = selection == "robot" and carry_robot_across_chunks and carry_boxes
             detections = (
                 detector(pil_frames[0], candidate_labels=[prompt], threshold=threshold)
-                if carry_box is None
+                if carry_box is None and not use_carried_robot
                 else []
             )
             if selection == "object" and carry_box is not None:
                 boxes = [carry_box]
+            elif use_carried_robot:
+                boxes = carry_boxes
             elif selection == "robot":
                 boxes = select_robot_boxes(
                     detections,
@@ -354,6 +398,13 @@ def segment_robot_video(
                     height,
                     minimum_size=initial_object_extent,
                 )
+            if selection == "robot" and carry_robot_across_chunks and last_combined is not None:
+                carry_boxes = carry_robot_boxes(
+                    last_combined,
+                    width,
+                    height,
+                    expected_arms=expected_arms,
+                )
             chunks.append(
                 {
                     "chunk_index": chunk_index,
@@ -381,6 +432,7 @@ def segment_robot_video(
         "max_objects": max_objects,
         "seed_box_xyxy": seed_box,
         "carry_object_across_chunks": selection == "object",
+        "carry_robot_across_chunks": selection == "robot" and carry_robot_across_chunks,
         "expected_arms": expected_arms,
         "threshold": threshold,
         "box_expansion": box_expansion,

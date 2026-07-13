@@ -31,7 +31,9 @@ from .media import (
     distort_rgba_frames,
     distort_depth_frames,
     harmonize_rgba_frames,
+    fuse_robot_gripper_masks,
     inpaint_propainter,
+    inpaint_static_camera,
     inpaint_video,
     refine_robot_masks,
     restore_protected_video,
@@ -717,6 +719,56 @@ def inpaint(video: Path, masks: Path, output: Path, method: str = "telea") -> No
     typer.echo(inpaint_video(video, masks, output, method))
 
 
+@app.command("fuse-robot-gripper-masks")
+def fuse_robot_gripper_masks_command(
+    robot_masks: Path,
+    gripper_masks: Path,
+    output: Path,
+    proximity_radius: int = typer.Option(24, min=0),
+    minimum_component_area: int = typer.Option(12, min=1),
+) -> None:
+    typer.echo(
+        fuse_robot_gripper_masks(
+            robot_masks,
+            gripper_masks,
+            output,
+            proximity_radius=proximity_radius,
+            minimum_component_area=minimum_component_area,
+        )
+    )
+
+
+@app.command("inpaint-static-camera")
+def inpaint_static_camera_command(
+    video: Path,
+    masks: Path,
+    output: Path,
+    protected_masks: Path | None = None,
+    fallback_video: Path | None = typer.Option(
+        None, help="Neural inpaint used where the clean plate is missing or disagrees"
+    ),
+    fallback_disagreement_threshold: float = typer.Option(0.08, min=0, max=1),
+    sample_stride: int = typer.Option(5, min=1),
+    minimum_clean_observations: int = typer.Option(3, min=1),
+    fallback_radius: int = typer.Option(7, min=1),
+    feather_radius: int = typer.Option(1, min=0),
+) -> None:
+    typer.echo(
+        inpaint_static_camera(
+            video,
+            masks,
+            output,
+            protected_mask_dir=protected_masks,
+            fallback_video=fallback_video,
+            fallback_disagreement_threshold=fallback_disagreement_threshold,
+            sample_stride=sample_stride,
+            minimum_clean_observations=minimum_clean_observations,
+            fallback_radius=fallback_radius,
+            feather_radius=feather_radius,
+        )
+    )
+
+
 @app.command("refine-removal-masks")
 def refine_removal_masks(
     video: Path,
@@ -862,6 +914,9 @@ def segment_robot(
     chunk_frames: int = 300,
     max_frames: int | None = None,
     device: int = 0,
+    carry_robot_across_chunks: bool = typer.Option(
+        True, help="Reuse edge-connected arm tracks instead of re-detecting every chunk"
+    ),
 ) -> None:
     typer.echo(
         segment_robot_video(
@@ -875,6 +930,7 @@ def segment_robot(
             chunk_frames=chunk_frames,
             max_frames=max_frames,
             device=device,
+            carry_robot_across_chunks=carry_robot_across_chunks,
         )
     )
 

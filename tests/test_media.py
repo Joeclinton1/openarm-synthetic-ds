@@ -7,6 +7,7 @@ import pytest
 from openarm_retarget.ai_masks import (
     _read_video_chunks,
     carry_object_box,
+    carry_robot_boxes,
     combine_object_masks,
     select_prompt_boxes,
     select_robot_boxes,
@@ -16,7 +17,9 @@ from openarm_retarget.media import (
     composite_rgba,
     distort_rgba_frames,
     distort_depth_frames,
+    fuse_robot_gripper_masks,
     harmonize_rgba_frames,
+    inpaint_static_camera,
     inpaint_video,
     refine_robot_masks,
     record_style_validation,
@@ -158,6 +161,18 @@ def test_carry_object_box_retains_initial_extent_for_fragmented_track() -> None:
     assert box[0] < 95 < box[2]
 
 
+def test_carry_robot_boxes_rejects_free_scene_objects() -> None:
+    mask = np.zeros((100, 200), dtype=np.uint8)
+    mask[20:80, :30] = 1
+    mask[10:75, 175:] = 1
+    mask[40:70, 80:110] = 1
+
+    boxes = carry_robot_boxes(mask, 200, 100, expansion_fraction=0)
+
+    assert boxes is not None
+    assert sorted(boxes) == [[0.0, 20.0, 30.0, 80.0], [175.0, 10.0, 200.0, 75.0]]
+
+
 def test_inpaint_video_streams_and_preserves_frame_count(tmp_path) -> None:
     source = tmp_path / "source.mp4"
     masks = tmp_path / "masks"
@@ -178,6 +193,101 @@ def test_inpaint_video_streams_and_preserves_frame_count(tmp_path) -> None:
         count += 1
     capture.release()
     assert count == 7
+
+
+def test_gripper_mask_fusion_keeps_only_components_near_robot(tmp_path) -> None:
+    robot = tmp_path / "robot"
+    gripper = tmp_path / "gripper"
+    fused = tmp_path / "fused"
+    robot.mkdir()
+    gripper.mkdir()
+    primary = np.zeros((40, 60), dtype=np.uint8)
+    primary[12:28, 5:20] = 255
+    auxiliary = np.zeros_like(primary)
+    auxiliary[15:25, 22:30] = 255
+    auxiliary[4:12, 48:56] = 255
+    cv2.imwrite(str(robot / "000000.png"), primary)
+    cv2.imwrite(str(gripper / "000000.png"), auxiliary)
+    fuse_robot_gripper_masks(robot, gripper, fused, proximity_radius=4)
+    result = cv2.imread(str(fused / "000000.png"), cv2.IMREAD_GRAYSCALE)
+    assert np.all(result[15:25, 22:30] == 255)
+    assert not np.any(result[4:12, 48:56])
+
+
+def test_static_camera_clean_plate_recovers_temporally_visible_background(tmp_path) -> None:
+    source = tmp_path / "source.mp4"
+    masks = tmp_path / "masks"
+    masks.mkdir()
+    width, height = 64, 48
+    x = np.arange(width, dtype=np.uint8)[None, :]
+    y = np.arange(height, dtype=np.uint8)[:, None]
+    background = np.stack(
+        [
+            np.broadcast_to(40 + x, (height, width)),
+            np.broadcast_to(60 + y, (height, width)),
+            np.full((height, width), 90, dtype=np.uint8),
+        ],
+        axis=2,
+    )
+    writer = cv2.VideoWriter(str(source), cv2.VideoWriter_fourcc(*"mp4v"), 10, (width, height))
+    for index in range(8):
+        frame = background.copy()
+        left = 4 + index * 6
+        frame[16:30, left : left + 12] = (10, 10, 220)
+        writer.write(frame)
+        mask = np.zeros((height, width), dtype=np.uint8)
+        mask[16:30, left : left + 12] = 255
+        cv2.imwrite(str(masks / f"{index:06d}.png"), mask)
+    writer.release()
+    output = inpaint_static_camera(
+        source,
+        masks,
+        tmp_path / "clean.mp4",
+        sample_stride=1,
+        minimum_clean_observations=2,
+        feather_radius=0,
+    )
+    capture = cv2.VideoCapture(str(output))
+    ok, recovered = capture.read()
+    capture.release()
+    assert ok
+    region = recovered[16:30, 4:16].astype(np.float32)
+    expected = background[16:30, 4:16].astype(np.float32)
+    assert np.mean(np.abs(region - expected)) < 8
+
+
+def test_static_camera_uses_neural_fallback_only_for_never_seen_pixels(tmp_path) -> None:
+    source = tmp_path / "source.mp4"
+    fallback = tmp_path / "fallback.mp4"
+    masks = tmp_path / "masks"
+    masks.mkdir()
+    source_writer = cv2.VideoWriter(str(source), cv2.VideoWriter_fourcc(*"mp4v"), 10, (32, 24))
+    fallback_writer = cv2.VideoWriter(str(fallback), cv2.VideoWriter_fourcc(*"mp4v"), 10, (32, 24))
+    for index in range(4):
+        frame = np.full((24, 32, 3), 40, dtype=np.uint8)
+        frame[8:16, 12:20] = 220
+        source_writer.write(frame)
+        fallback_writer.write(np.full_like(frame, 130))
+        mask = np.zeros((24, 32), dtype=np.uint8)
+        mask[8:16, 12:20] = 255
+        cv2.imwrite(str(masks / f"{index:06d}.png"), mask)
+    source_writer.release()
+    fallback_writer.release()
+
+    output = inpaint_static_camera(
+        source,
+        masks,
+        tmp_path / "clean.mp4",
+        fallback_video=fallback,
+        sample_stride=1,
+        feather_radius=0,
+    )
+    capture = cv2.VideoCapture(str(output))
+    ok, recovered = capture.read()
+    capture.release()
+    assert ok
+    assert 115 < float(np.mean(recovered[9:15, 13:19])) < 140
+    assert 30 < float(np.mean(recovered[:6, :6])) < 55
 
 
 def test_render_validation_rejects_offscreen_robot(tmp_path) -> None:

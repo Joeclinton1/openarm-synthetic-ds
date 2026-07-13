@@ -199,10 +199,18 @@ deterministic composite -> optional mask-constrained VACE -> validation or fallb
 
 Operational sequence:
 
-1. Segment with RobotSeg for high-precision robot masks, or bounded-memory Grounding-DINO +
-   SAM2.1 via `segment-robot`. Track manipulated objects separately.
-2. Run official ProPainter through `inpaint-propainter`; long videos use overlapping windows.
-   Use `restore-protected --exclude-masks` so restoration cannot paste the source gripper back.
+1. Segment with bounded-memory Grounding-DINO + SAM2.1 via `segment-robot`. Robot tracks are
+   carried across chunk boundaries from edge-connected components; independent re-detection at
+   every boundary can confuse a manipulated object with the arm. Run RobotSeg's `robot` and
+   `gripper` categories separately, then use `fuse-robot-gripper-masks`. Gripper components are
+   accepted only near the primary arm track, improving small-finger recall without accepting
+   disconnected prompt drift. Track manipulated objects separately.
+2. For fixed cameras, `inpaint-static-camera` constructs a mask-aware temporal median clean plate
+   and reports held-out plate error. Pixels never exposed can use a neural result as a fallback;
+   the fallback is restricted to missing or strongly disagreeing plate pixels. For scenes without
+   a usable clean plate, run official ProPainter through `inpaint-propainter`; long videos use
+   overlapping windows. Use the tighter RobotSeg mask with `restore-protected --exclude-masks` so
+   visible object pixels return without pasting the source gripper back.
 3. Map frame-aligned camera calibration through the same OpenArm base registration. AgiBot's
    stored intrinsics are scaled explicitly when calibration and video resolutions differ.
 4. Export official meshes and FK with `blender-scene`. Render resumable transparent RGBA and
@@ -274,8 +282,9 @@ The full visual fixture is AgiBot episode `649684` at 1,026 frames and 640x480:
 
 | Gate | Accepted result |
 |---|---|
-| Removal masks | Zero empty frames; 1.0 raw-mask recall; 0.9885 p05 temporal IoU. |
-| ProPainter | 159.7 s including extraction/stitching; chunk boundaries below normal p95 frame change. |
+| Removal masks | Carried SAM2 track plus proximity-gated RobotSeg gripper fusion; accepted gripper recall increased from 0.9664 to 1.0 while 685 disconnected components were rejected. |
+| Removal candidate | The old result failed the current residual-copy gate (0.3086 p95). The corrected full fixture passes at 0.0183 p95 and 0.00619 mean copied-source fraction. Independent RobotSeg residual-mask area fell 64.0% (0.01416 to 0.00509 mean). |
+| Static clean plate | 25.3 s for 1,026 frames at 640x480; 93.37% of pixels had at least three clean observations. A neural fallback was needed for the permanently occluded 6.57%. |
 | Cycles geometry | 0.9723 mean / 0.9477 p05 MuJoCo coverage agreement; zero depth leakage. |
 | EEVEE geometry | 0.9595 mean IoU against Cycles; deterministic decoded pixels. |
 | Gripper contact geometry (corrected replay) | 1,018/1,026 retained frames; 6.91 mm p95 / 9.73 mm maximum pinch-midpoint error; physical jaw aperture error below 1.3e-16 m. |

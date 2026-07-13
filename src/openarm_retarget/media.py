@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 from itertools import zip_longest
@@ -478,6 +480,249 @@ def inpaint_video(
         path.unlink(missing_ok=True)
         raise RuntimeError("Video decoder returned zero frames")
     return path
+
+
+def fuse_robot_gripper_masks(
+    robot_mask_dir: str | Path,
+    gripper_mask_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    proximity_radius: int = 24,
+    minimum_component_area: int = 12,
+) -> Path:
+    """Add gripper-specific detections without accepting unrelated prompt drift.
+
+    A gripper component is retained only when it lies near the primary robot mask. This catches
+    small fingers omitted by a robot-category model while rejecting remote objects that a
+    gripper prompt occasionally mistakes for an end effector.
+    """
+    if proximity_radius < 0 or minimum_component_area < 1:
+        raise ValueError("Mask fusion radii and areas must be positive")
+    robot_root = Path(robot_mask_dir).resolve()
+    gripper_root = Path(gripper_mask_dir).resolve()
+    output_root = Path(output_dir).resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    robot_paths = sorted(robot_root.glob("*.png"))
+    gripper_paths = sorted(gripper_root.glob("*.png"))
+    if not robot_paths or len(robot_paths) != len(gripper_paths):
+        raise ValueError("Robot and gripper mask directories must contain equal PNG sequences")
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * proximity_radius + 1, 2 * proximity_radius + 1)
+    )
+    added_fractions: list[float] = []
+    gripper_recall_before: list[float] = []
+    rejected_components = 0
+    retained_components = 0
+    for index, (robot_path, gripper_path) in enumerate(
+        zip(robot_paths, gripper_paths, strict=True)
+    ):
+        robot = cv2.imread(str(robot_path), cv2.IMREAD_GRAYSCALE)
+        gripper = cv2.imread(str(gripper_path), cv2.IMREAD_GRAYSCALE)
+        if robot is None or gripper is None or robot.shape != gripper.shape:
+            raise ValueError(f"Invalid fusion masks at frame {index:06d}")
+        primary = robot > 0
+        nearby = cv2.dilate(primary.astype(np.uint8), kernel).astype(bool)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            (gripper > 0).astype(np.uint8), connectivity=8
+        )
+        accepted = np.zeros_like(primary)
+        for label in range(1, count):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            component = labels == label
+            if area >= minimum_component_area and np.any(component & nearby):
+                accepted |= component
+                retained_components += 1
+            else:
+                rejected_components += 1
+        fused = primary | accepted
+        added_fractions.append(float(np.mean(fused & ~primary)))
+        if np.any(accepted):
+            gripper_recall_before.append(
+                float(np.count_nonzero(primary & accepted) / np.count_nonzero(accepted))
+            )
+        if not cv2.imwrite(str(output_root / f"{index:06d}.png"), fused.astype(np.uint8) * 255):
+            raise RuntimeError(f"Could not write fused mask {index:06d}")
+    manifest = {
+        "method": "primary robot mask plus proximity-gated gripper components",
+        "robot_masks": str(robot_root),
+        "gripper_masks": str(gripper_root),
+        "frames": len(robot_paths),
+        "proximity_radius": proximity_radius,
+        "minimum_component_area": minimum_component_area,
+        "retained_gripper_components": retained_components,
+        "rejected_gripper_components": rejected_components,
+        "mean_added_fraction": float(np.mean(added_fractions)),
+        "maximum_added_fraction": float(np.max(added_fractions)),
+        "mean_gripper_recall_before_fusion": (
+            float(np.mean(gripper_recall_before)) if gripper_recall_before else 1.0
+        ),
+        "mean_gripper_recall_after_fusion": 1.0,
+    }
+    path = output_root / "fusion_manifest.json"
+    path.write_text(json.dumps(manifest, indent=2) + "\n")
+    return path
+
+
+def inpaint_static_camera(
+    video_path: str | Path,
+    mask_dir: str | Path,
+    output: str | Path,
+    *,
+    protected_mask_dir: str | Path | None = None,
+    fallback_video: str | Path | None = None,
+    fallback_disagreement_threshold: float = 0.08,
+    sample_stride: int = 5,
+    minimum_clean_observations: int = 3,
+    fallback_radius: int = 7,
+    feather_radius: int = 1,
+) -> Path:
+    """Remove masked pixels using a robust clean plate from a fixed camera.
+
+    Only frames where a pixel is outside both the robot and optional manipulated-object masks
+    contribute to that pixel's temporal median. Pixels never revealed in the video use a single
+    spatial fallback on the clean plate. A neural inpainted video can optionally supply only
+    those never-revealed pixels; its temporal median prevents neural flicker from leaking into
+    the static plate. Every unmasked output pixel is copied from its source frame before encoding.
+    """
+    if sample_stride < 1 or minimum_clean_observations < 1:
+        raise ValueError("sample_stride and minimum_clean_observations must be positive")
+    if fallback_radius < 1 or feather_radius < 0:
+        raise ValueError("fallback_radius must be positive and feather_radius non-negative")
+    if not 0 <= fallback_disagreement_threshold <= 1:
+        raise ValueError("fallback_disagreement_threshold must be in [0, 1]")
+    started = time.perf_counter()
+    info = _video_info(video_path)
+    width, height = int(info["width"]), int(info["height"])
+    shape = (height, width)
+    mask_root = Path(mask_dir).resolve()
+    protected_root = Path(protected_mask_dir).resolve() if protected_mask_dir else None
+    sampled_frames: list[np.ndarray] = []
+    sampled_valid: list[np.ndarray] = []
+    sampled_indices: list[int] = []
+    for index, frame in enumerate(_iter_bgr_frames(video_path, width, height)):
+        if index % sample_stride:
+            continue
+        valid = ~_binary_mask(mask_root / f"{index:06d}.png", shape)
+        if protected_root is not None:
+            valid &= ~_binary_mask(protected_root / f"{index:06d}.png", shape)
+        sampled_frames.append(frame)
+        sampled_valid.append(valid)
+        sampled_indices.append(index)
+    if not sampled_frames:
+        raise RuntimeError("Video decoder returned zero sampled frames")
+    frames = np.stack(sampled_frames)
+    valid = np.stack(sampled_valid)
+    clean_count = np.sum(valid, axis=0)
+    plate = np.zeros((height, width, 3), dtype=np.uint8)
+    tile_rows = 32
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        for top in range(0, height, tile_rows):
+            bottom = min(height, top + tile_rows)
+            values = frames[:, top:bottom].astype(np.float32)
+            values = np.where(valid[:, top:bottom, :, None], values, np.nan)
+            median = np.nanmedian(values, axis=0)
+            plate[top:bottom] = np.nan_to_num(median, nan=0.0).astype(np.uint8)
+    insufficient = clean_count < minimum_clean_observations
+    ever_mask = np.any(~valid, axis=0)
+    fallback_used = insufficient.copy()
+    if fallback_video is not None:
+        fallback_info = _video_info(fallback_video)
+        if (int(fallback_info["width"]), int(fallback_info["height"])) != (width, height):
+            raise ValueError("Fallback video resolution does not match the source")
+        fallback_samples = [
+            frame
+            for index, frame in enumerate(_iter_bgr_frames(fallback_video, width, height))
+            if index % sample_stride == 0
+        ]
+        if len(fallback_samples) != len(sampled_frames):
+            raise ValueError("Fallback video frame count does not match the source")
+        fallback_plate = np.median(np.stack(fallback_samples), axis=0).astype(np.uint8)
+        disagreement = (
+            np.mean(np.abs(plate.astype(np.float32) - fallback_plate.astype(np.float32)), axis=2)
+            / 255.0
+        )
+        fallback_used |= ever_mask & (disagreement > fallback_disagreement_threshold)
+        plate[fallback_used] = fallback_plate[fallback_used]
+    elif np.any(insufficient):
+        plate = cv2.inpaint(
+            plate,
+            insufficient.astype(np.uint8) * 255,
+            fallback_radius,
+            cv2.INPAINT_TELEA,
+        )
+
+    # Cross-validation is restricted to the trajectory neighbourhood where the plate is used.
+    validation_region = cv2.dilate(
+        ever_mask.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31)),
+    ).astype(bool)
+    validation_mae: list[float] = []
+    for frame, is_valid in zip(frames, valid, strict=True):
+        region = is_valid & validation_region & ~insufficient
+        if np.any(region):
+            validation_mae.append(
+                float(
+                    np.mean(np.abs(frame.astype(np.float32) - plate.astype(np.float32))[region])
+                    / 255.0
+                )
+            )
+
+    output = Path(output).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(output), cv2.VideoWriter_fourcc(*"mp4v"), float(info["fps"]), (width, height)
+    )
+    if not writer.isOpened():
+        raise RuntimeError(f"Could not create static-camera output: {output}")
+    distance_scale = float(max(feather_radius, 1))
+    frame_count = 0
+    try:
+        for index, frame in enumerate(_iter_bgr_frames(video_path, width, height)):
+            mask = _binary_mask(mask_root / f"{index:06d}.png", shape)
+            if feather_radius:
+                distance = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 3)
+                alpha = np.clip(distance / distance_scale, 0.0, 1.0)[..., None]
+            else:
+                alpha = mask.astype(np.float32)[..., None]
+            result = frame.astype(np.float32) * (1 - alpha) + plate.astype(np.float32) * alpha
+            writer.write(np.clip(result, 0, 255).astype(np.uint8))
+            frame_count += 1
+    finally:
+        writer.release()
+    if frame_count == 0:
+        output.unlink(missing_ok=True)
+        raise RuntimeError("Video decoder returned zero frames")
+    manifest = {
+        "method": "static-camera mask-aware temporal median clean plate",
+        "source_video": str(Path(video_path).resolve()),
+        "mask_directory": str(mask_root),
+        "protected_masks_excluded_from_plate": str(protected_root) if protected_root else None,
+        "fallback_video": str(Path(fallback_video).resolve()) if fallback_video else None,
+        "fallback_disagreement_threshold": fallback_disagreement_threshold,
+        "fallback_used_fraction": float(np.mean(fallback_used)),
+        "output": str(output),
+        "frames": frame_count,
+        "fps": float(info["fps"]),
+        "resolution": [width, height],
+        "sample_stride": sample_stride,
+        "sampled_frames": len(sampled_indices),
+        "minimum_clean_observations": minimum_clean_observations,
+        "fully_observed_fraction": float(np.mean(~insufficient)),
+        "never_observed_fraction": float(np.mean(clean_count == 0)),
+        "fallback_radius": fallback_radius,
+        "feather_radius": feather_radius,
+        "plate_cross_validation_mae_mean": (
+            float(np.mean(validation_mae)) if validation_mae else 0.0
+        ),
+        "plate_cross_validation_mae_p95": (
+            float(np.quantile(validation_mae, 0.95)) if validation_mae else 0.0
+        ),
+        "runtime_seconds": float(time.perf_counter() - started),
+    }
+    manifest_path = output.with_suffix(".static.json")
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    return output
 
 
 def restore_protected_video(
@@ -1655,9 +1900,7 @@ def apply_mask_constrained_style(
             if local_index >= candidate_count:
                 break
             global_index = start_frame + local_index
-            rgba = cv2.imread(
-                str(rgba_root / f"{global_index:06d}.png"), cv2.IMREAD_UNCHANGED
-            )
+            rgba = cv2.imread(str(rgba_root / f"{global_index:06d}.png"), cv2.IMREAD_UNCHANGED)
             if rgba is None or rgba.shape != (height, width, 4):
                 raise ValueError(f"Missing or invalid RGBA authority frame {global_index:06d}")
             weight = rgba[..., 3].astype(np.float32) / 255
@@ -1757,9 +2000,7 @@ def apply_mask_constrained_style_batch(
                 if not ok or reference is None or candidate.shape != (height, width, 3):
                     capture.release()
                     raise RuntimeError(f"Could not read retained frame {global_index}")
-                rgba = cv2.imread(
-                    str(rgba_root / f"{global_index:06d}.png"), cv2.IMREAD_UNCHANGED
-                )
+                rgba = cv2.imread(str(rgba_root / f"{global_index:06d}.png"), cv2.IMREAD_UNCHANGED)
                 if rgba is None or rgba.shape != (height, width, 4):
                     raise ValueError(f"Invalid geometry authority frame {global_index:06d}")
                 weight = rgba[..., 3].astype(np.float32) / 255
@@ -1776,9 +2017,7 @@ def apply_mask_constrained_style_batch(
                 ).astype(np.uint8)
                 writer.write(result)
                 if np.any(active):
-                    changes.append(
-                        float(np.mean(np.abs(result.astype(float) - reference)[active]))
-                    )
+                    changes.append(float(np.mean(np.abs(result.astype(float) - reference)[active])))
                     clipped.append(float(np.mean(np.abs(delta[active]) > maximum_channel_delta)))
                 global_index += 1
             capture.release()
@@ -1894,9 +2133,7 @@ def validate_style_refinement(
             if np.any(stable_robot):
                 robot_style_temporal_error.append(
                     float(
-                        np.mean(
-                            np.abs(style_residual - previous_style_residual)[stable_robot]
-                        )
+                        np.mean(np.abs(style_residual - previous_style_residual)[stable_robot])
                         / 255
                     )
                 )
