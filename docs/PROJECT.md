@@ -4,6 +4,9 @@ This file is the operational contract, workflow, current status, and design rati
 OpenArm 2.0 retargeting pipeline. Generated datasets and audit artifacts live under Git-ignored
 `data/` and `outputs/`.
 
+The eight-clip visual evaluation and its portability constraints are documented separately in
+[`CROSS_DATASET_BENCHMARK.md`](CROSS_DATASET_BENCHMARK.md).
+
 ## Status
 
 | Area | State | Boundary |
