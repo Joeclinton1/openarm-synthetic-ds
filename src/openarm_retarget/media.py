@@ -185,13 +185,16 @@ def refine_robot_masks(
     use_optical_flow: bool = True,
     flow_scale: float = 0.25,
     protect_convex_hull: bool = True,
+    subtract_protected_masks: bool = False,
 ) -> Path:
-    """Make removal masks contact-safe and temporally complete.
+    """Make removal masks temporally complete and safe for later object restoration.
 
     SAM masks are closed, motion-compensated from the preceding and following frames, and
-    dilated to cover antialiased robot boundaries. Optional manipulated-object masks are
-    subtracted after a small expansion, ensuring that held objects survive both inpainting and
-    compositing. Processing is streaming and bounded to three decoded frames.
+    dilated to cover antialiased robot boundaries. Optional manipulated-object masks are measured
+    but, by default, are *not* subtracted: removing the complete robot/object contact region and
+    restoring visible object pixels afterwards avoids retaining pieces of the old gripper.
+    ``subtract_protected_masks`` preserves the legacy pre-inpaint subtraction when explicitly
+    requested. Processing is streaming and bounded to three decoded frames.
     """
     if min(dilation_radius, closing_radius, protect_margin) < 0:
         raise ValueError("Mask radii cannot be negative")
@@ -215,6 +218,7 @@ def refine_robot_masks(
     )
     areas: list[float] = []
     protected_areas: list[float] = []
+    protected_overlap: list[float] = []
     propagated_previous: list[float] = []
     propagated_next: list[float] = []
 
@@ -257,7 +261,9 @@ def refine_robot_masks(
             keep = keep_mask.astype(np.uint8)
             if protect_margin:
                 keep = cv2.dilate(keep, protect_kernel)
-            current_u8[keep > 0] = 0
+            protected_overlap.append(float(np.mean((current_u8 > 0) & (keep > 0))))
+            if subtract_protected_masks:
+                current_u8[keep > 0] = 0
             protected_areas.append(float(np.mean(keep > 0)))
         areas.append(float(np.mean(current_u8 > 0)))
         if not cv2.imwrite(str(output_dir / f"{index:06d}.png"), current_u8 * 255):
@@ -286,6 +292,7 @@ def refine_robot_masks(
         "optical_flow_direction": "previous+next" if use_optical_flow else "disabled",
         "flow_scale": flow_scale,
         "protect_convex_hull": protect_convex_hull,
+        "subtract_protected_masks": subtract_protected_masks,
         "mean_removal_fraction": float(np.mean(areas)),
         "max_removal_fraction": float(np.max(areas)),
         "mean_previous_propagated_fraction": (
@@ -295,6 +302,9 @@ def refine_robot_masks(
             float(np.mean(propagated_next)) if propagated_next else 0.0
         ),
         "mean_protected_fraction": (float(np.mean(protected_areas)) if protected_areas else 0.0),
+        "mean_robot_protected_overlap_before_subtraction": (
+            float(np.mean(protected_overlap)) if protected_overlap else 0.0
+        ),
     }
     path = output_dir / "refinement_manifest.json"
     path.write_text(json.dumps(manifest, indent=2) + "\n")
@@ -635,8 +645,11 @@ def inpaint_static_camera(
     *,
     protected_mask_dir: str | Path | None = None,
     fallback_video: str | Path | None = None,
-    fallback_disagreement_threshold: float = 0.08,
-    sample_stride: int = 5,
+    reference_image: str | Path | None = None,
+    fallback_disagreement_threshold: float | None = None,
+    maximum_clean_mad: float = 0.04,
+    fallback_context_radius: int = 24,
+    sample_stride: int = 10,
     minimum_clean_observations: int = 3,
     fallback_radius: int = 7,
     feather_radius: int = 1,
@@ -644,17 +657,29 @@ def inpaint_static_camera(
     """Remove masked pixels using a robust clean plate from a fixed camera.
 
     Only frames where a pixel is outside both the robot and optional manipulated-object masks
-    contribute to that pixel's temporal median. Pixels never revealed in the video use a single
-    spatial fallback on the clean plate. A neural inpainted video can optionally supply only
-    those never-revealed pixels; its temporal median prevents neural flicker from leaking into
-    the static plate. Every unmasked output pixel is copied from its source frame before encoding.
+    contribute to that pixel's temporal median. A plate pixel is trusted only when it has enough
+    observations and low median absolute deviation (MAD). A reusable clean reference image can
+    supply unreliable pixels without per-episode neural inference. A neural inpainted video can
+    instead supply the corresponding frame when moving-object state must be preserved. Every
+    unmasked output pixel is copied from its source frame before encoding.
     """
     if sample_stride < 1 or minimum_clean_observations < 1:
         raise ValueError("sample_stride and minimum_clean_observations must be positive")
-    if fallback_radius < 1 or feather_radius < 0:
-        raise ValueError("fallback_radius must be positive and feather_radius non-negative")
-    if not 0 <= fallback_disagreement_threshold <= 1:
-        raise ValueError("fallback_disagreement_threshold must be in [0, 1]")
+    if fallback_radius < 1 or min(feather_radius, fallback_context_radius) < 0:
+        raise ValueError("fallback_radius must be positive and other radii non-negative")
+    if fallback_disagreement_threshold is not None:
+        if not 0 <= fallback_disagreement_threshold <= 1:
+            raise ValueError("fallback_disagreement_threshold must be in [0, 1]")
+        warnings.warn(
+            "fallback_disagreement_threshold is deprecated; use maximum_clean_mad",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        maximum_clean_mad = fallback_disagreement_threshold
+    if not 0 <= maximum_clean_mad <= 1:
+        raise ValueError("maximum_clean_mad must be in [0, 1]")
+    if fallback_video is not None and reference_image is not None:
+        raise ValueError("fallback_video and reference_image are mutually exclusive")
     started = time.perf_counter()
     info = _video_info(video_path)
     width, height = int(info["width"]), int(info["height"])
@@ -679,6 +704,7 @@ def inpaint_static_camera(
     valid = np.stack(sampled_valid)
     clean_count = np.sum(valid, axis=0)
     plate = np.zeros((height, width, 3), dtype=np.uint8)
+    plate_mad = np.full((height, width), np.inf, dtype=np.float32)
     tile_rows = 32
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
@@ -688,31 +714,44 @@ def inpaint_static_camera(
             values = np.where(valid[:, top:bottom, :, None], values, np.nan)
             median = np.nanmedian(values, axis=0)
             plate[top:bottom] = np.nan_to_num(median, nan=0.0).astype(np.uint8)
+            deviation = np.mean(np.abs(values - median[None, ...]), axis=3) / 255.0
+            plate_mad[top:bottom] = np.nan_to_num(
+                np.nanmedian(deviation, axis=0), nan=np.inf, posinf=np.inf
+            )
     insufficient = clean_count < minimum_clean_observations
+    unstable = plate_mad > maximum_clean_mad
+    unreliable = insufficient | unstable
     ever_mask = np.any(~valid, axis=0)
-    fallback_used = insufficient.copy()
+    fallback_needed = unreliable & ever_mask
+    fallback_weight = np.zeros_like(plate_mad)
+    fallback_reference = None
+    if reference_image is not None:
+        fallback_reference = cv2.imread(str(reference_image), cv2.IMREAD_COLOR)
+        if fallback_reference is None:
+            raise FileNotFoundError(reference_image)
+        if fallback_reference.shape[:2] != shape:
+            raise ValueError("Reference image resolution does not match the source")
     if fallback_video is not None:
         fallback_info = _video_info(fallback_video)
         if (int(fallback_info["width"]), int(fallback_info["height"])) != (width, height):
             raise ValueError("Fallback video resolution does not match the source")
-        fallback_samples = [
-            frame
-            for index, frame in enumerate(_iter_bgr_frames(fallback_video, width, height))
-            if index % sample_stride == 0
-        ]
-        if len(fallback_samples) != len(sampled_frames):
+        source_frames = int(info["frames"])
+        fallback_frames = int(fallback_info["frames"])
+        if source_frames >= 0 and fallback_frames >= 0 and fallback_frames != source_frames:
             raise ValueError("Fallback video frame count does not match the source")
-        fallback_plate = np.median(np.stack(fallback_samples), axis=0).astype(np.uint8)
-        disagreement = (
-            np.mean(np.abs(plate.astype(np.float32) - fallback_plate.astype(np.float32)), axis=2)
-            / 255.0
-        )
-        fallback_used |= ever_mask & (disagreement > fallback_disagreement_threshold)
-        plate[fallback_used] = fallback_plate[fallback_used]
-    elif np.any(insufficient):
+    if fallback_video is not None or fallback_reference is not None:
+        fallback_weight = fallback_needed.astype(np.float32)
+        if fallback_context_radius and np.any(fallback_needed):
+            distance = cv2.distanceTransform(
+                (~fallback_needed).astype(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE
+            )
+            fallback_weight = np.clip(
+                2.0 - 2.0 * distance / float(fallback_context_radius), 0.0, 1.0
+            )
+    elif np.any(unreliable):
         plate = cv2.inpaint(
             plate,
-            insufficient.astype(np.uint8) * 255,
+            unreliable.astype(np.uint8) * 255,
             fallback_radius,
             cv2.INPAINT_TELEA,
         )
@@ -724,7 +763,7 @@ def inpaint_static_camera(
     ).astype(bool)
     validation_mae: list[float] = []
     for frame, is_valid in zip(frames, valid, strict=True):
-        region = is_valid & validation_region & ~insufficient
+        region = is_valid & validation_region & ~unreliable
         if np.any(region):
             validation_mae.append(
                 float(
@@ -742,30 +781,76 @@ def inpaint_static_camera(
         raise RuntimeError(f"Could not create static-camera output: {output}")
     distance_scale = float(max(feather_radius, 1))
     frame_count = 0
+    fallback_iterator = (
+        iter(_iter_bgr_frames(fallback_video, width, height))
+        if fallback_video is not None
+        else None
+    )
+    plate_float = plate.astype(np.float32)
+    static_fallback_fill = None
+    if fallback_reference is not None:
+        weight = fallback_weight[..., None]
+        static_fallback_fill = (
+            plate_float * (1 - weight) + fallback_reference.astype(np.float32) * weight
+        )
     try:
         for index, frame in enumerate(_iter_bgr_frames(video_path, width, height)):
             mask = _binary_mask(mask_root / f"{index:06d}.png", shape)
+            fill = static_fallback_fill if static_fallback_fill is not None else plate_float
+            if fallback_iterator is not None:
+                fallback_frame = next(fallback_iterator, None)
+                if fallback_frame is None:
+                    raise ValueError("Fallback video has fewer frames than the source")
+            else:
+                fallback_frame = None
+            if fallback_frame is not None:
+                weight = fallback_weight[..., None]
+                fill = plate_float * (1 - weight) + fallback_frame.astype(np.float32) * weight
             if feather_radius:
                 distance = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 3)
                 alpha = np.clip(distance / distance_scale, 0.0, 1.0)[..., None]
             else:
                 alpha = mask.astype(np.float32)[..., None]
-            result = frame.astype(np.float32) * (1 - alpha) + plate.astype(np.float32) * alpha
+            result = frame.astype(np.float32) * (1 - alpha) + fill * alpha
             writer.write(np.clip(result, 0, 255).astype(np.uint8))
             frame_count += 1
+        if fallback_iterator is not None and next(fallback_iterator, None) is not None:
+            raise ValueError("Fallback video has more frames than the source")
     finally:
         writer.release()
     if frame_count == 0:
         output.unlink(missing_ok=True)
         raise RuntimeError("Video decoder returned zero frames")
     manifest = {
-        "method": "static-camera mask-aware temporal median clean plate",
+        "method": (
+            "confidence-gated static plate with frame-aligned neural fallback"
+            if fallback_video is not None
+            else (
+                "confidence-gated static plate with reusable reference image"
+                if reference_image is not None
+                else "confidence-gated static plate with one-time spatial completion"
+            )
+        ),
         "source_video": str(Path(video_path).resolve()),
         "mask_directory": str(mask_root),
         "protected_masks_excluded_from_plate": str(protected_root) if protected_root else None,
         "fallback_video": str(Path(fallback_video).resolve()) if fallback_video else None,
-        "fallback_disagreement_threshold": fallback_disagreement_threshold,
-        "fallback_used_fraction": float(np.mean(fallback_used)),
+        "reference_image": str(Path(reference_image).resolve()) if reference_image else None,
+        "maximum_clean_mad": maximum_clean_mad,
+        "unreliable_trajectory_fraction": float(np.mean(fallback_needed)),
+        "fallback_used_fraction": (
+            float(np.mean(fallback_needed))
+            if fallback_video is not None or reference_image is not None
+            else 0.0
+        ),
+        "spatial_completion_fraction": (
+            float(np.mean(fallback_needed))
+            if fallback_video is None and reference_image is None
+            else 0.0
+        ),
+        "fallback_context_radius": fallback_context_radius,
+        "fallback_context_fraction": float(np.mean(fallback_weight > 0)),
+        "fallback_mean_weight": float(np.mean(fallback_weight)),
         "output": str(output),
         "frames": frame_count,
         "fps": float(info["fps"]),
@@ -774,6 +859,10 @@ def inpaint_static_camera(
         "sampled_frames": len(sampled_indices),
         "minimum_clean_observations": minimum_clean_observations,
         "fully_observed_fraction": float(np.mean(~insufficient)),
+        "stable_plate_fraction": float(np.mean(~unreliable)),
+        "unstable_plate_fraction": float(np.mean(unstable)),
+        "plate_mad_mean": float(np.mean(plate_mad[np.isfinite(plate_mad)])),
+        "plate_mad_p95": float(np.quantile(plate_mad[np.isfinite(plate_mad)], 0.95)),
         "never_observed_fraction": float(np.mean(clean_count == 0)),
         "fallback_radius": fallback_radius,
         "feather_radius": feather_radius,
@@ -1930,9 +2019,7 @@ def _photometric_samples(
         source_mask = _binary_mask(mask_root / f"{index:06d}.png", (height, width)) > 0
         render_mask = rgba[..., 3] >= 224
         if protected_root is not None:
-            protected = _binary_mask(
-                protected_root / f"{index:06d}.png", (height, width)
-            ) > 0
+            protected = _binary_mask(protected_root / f"{index:06d}.png", (height, width)) > 0
             source_mask &= ~protected
             render_mask &= ~protected
         source_pixels = source[source_mask]

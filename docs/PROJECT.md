@@ -14,7 +14,7 @@ OpenArm 2.0 retargeting pipeline. Generated datasets and audit artifacts live un
 | Gripper contact geometry | Complete computationally | One official-MJCF mapping drives MuJoCo, Blender, URLab, and export; physical pinch registration still inherits each source's calibration level. |
 | LeRobot v3 export | Complete | Feasible contiguous runs are exported without compressing invalid gaps. |
 | MuJoCo inspection | Complete | Fast geometry and segmentation reference. |
-| Robot removal | Accepted on the 1,026-frame fixture | RobotSeg/Grounding-DINO+SAM2, chunked ProPainter, and protected-object restoration. |
+| Robot removal | Accepted on the 1,026-frame fixture | RobotSeg/Grounding-DINO+SAM2, a confidence-gated clean plate with a reusable reference image, and protected-object restoration. |
 | OpenArm rendering | Accepted on the fixture | Cycles is the reference; EEVEE Next is the production preset. |
 | Unreal/URLab rendering | Integration implemented, acceptance pending | UE 5.7, job-v2, synchronized RGB/depth/instance capture, cooked runtime, and resumable shards are opt-in until the full fixture passes. |
 | Style refinement | Accepted behind a hard gate | VACE may change robot RGB only; deterministic compositing is the fallback. |
@@ -191,7 +191,9 @@ reproducible bootstrap; it is never promoted to measured calibration.
 The accepted path keeps geometry separate from generative appearance:
 
 ```text
-source -> robot/object masks -> ProPainter removal
+source -> robot/object masks -> confidence-gated static clean plate
+                             -> reusable clean reference (preferred)
+                             -> optional frame-aligned neural fallback
 solved joints + source camera -> transparent OpenArm RGBA/depth
 clean scene + render + object occlusion -> deterministic composite
 deterministic composite -> optional mask-constrained VACE -> validation or fallback
@@ -206,11 +208,16 @@ Operational sequence:
    accepted only near the primary arm track, improving small-finger recall without accepting
    disconnected prompt drift. Track manipulated objects separately.
 2. For fixed cameras, `inpaint-static-camera` constructs a mask-aware temporal median clean plate
-   and reports held-out plate error. Pixels never exposed can use a neural result as a fallback;
-   the fallback is restricted to missing or strongly disagreeing plate pixels. For scenes without
-   a usable clean plate, run official ProPainter through `inpaint-propainter`; long videos use
-   overlapping windows. Use the tighter RobotSeg mask with `restore-protected --exclude-masks` so
-   visible object pixels return without pasting the source gripper back.
+   and reports held-out plate error. It rejects plate pixels with too few observations or high
+   temporal MAD. Prefer `--reference-image` with an empty-scene frame or a one-time-inpainted clean
+   plate for each fixed camera/setup. It is reused for every frame and episode, eliminating
+   per-window model inference. If a frame-aligned neural removal is already available, it can
+   instead be supplied only around unreliable plate pixels; reliable source-derived pixels remain
+   unchanged. Spatial completion remains the no-reference fallback, but it produced more
+   robot-shaped residual on the full fixture. For scenes without a usable clean plate, run official
+   ProPainter through `inpaint-propainter`; long videos use overlapping windows. Remove the complete
+   robot/contact region first, then use `restore-protected --exclude-masks` with the tighter
+   RobotSeg mask so visible object pixels return without pasting the source gripper back.
 3. Map frame-aligned camera calibration through the same OpenArm base registration. AgiBot's
    stored intrinsics are scaled explicitly when calibration and video resolutions differ.
 4. Export official meshes and FK with `blender-scene`. Render resumable transparent RGBA and
@@ -291,8 +298,8 @@ The full visual fixture is AgiBot episode `649684` at 1,026 frames and 640x480:
 | Gate | Accepted result |
 |---|---|
 | Removal masks | Carried SAM2 track plus proximity-gated RobotSeg gripper fusion; accepted gripper recall increased from 0.9664 to 1.0 while 685 disconnected components were rejected. |
-| Removal candidate | The old result failed the current residual-copy gate (0.3086 p95). The corrected full fixture passes at 0.0183 p95 and 0.00619 mean copied-source fraction. Independent RobotSeg residual-mask area fell 64.0% (0.01416 to 0.00509 mean). |
-| Static clean plate | 25.3 s for 1,026 frames at 640x480; 93.37% of pixels had at least three clean observations. A neural fallback was needed for the permanently occluded 6.57%. |
+| Removal candidate | The corrected full fixture passes every inpainting gate. Against the previous accepted candidate, the reusable-reference result reduced protected-object MAE 57.1% (0.06725 to 0.02885) and boundary p95 10.4% (0.00218 to 0.00196). Independent RobotSeg residual-mask area fell another 6.9% mean and 20.3% p95 (0.00509/0.01206 to 0.00474/0.00962). |
+| Static clean plate | 17.95 s for the 1,026-frame, 34.2 s clip at 640x480 (57.2 fps, 1.90x real time). The reusable reference is prepared once per fixed setup; recurring episodes require no GPU model or inference windows. 93.21% of pixels had at least three clean observations. |
 | Cycles geometry | 0.9723 mean / 0.9477 p05 MuJoCo coverage agreement; zero depth leakage. |
 | EEVEE geometry | 0.9595 mean IoU against Cycles; deterministic decoded pixels. |
 | Gripper contact geometry (corrected replay) | 1,018/1,026 retained frames; 6.91 mm p95 / 9.73 mm maximum pinch-midpoint error; physical jaw aperture error below 1.3e-16 m. |

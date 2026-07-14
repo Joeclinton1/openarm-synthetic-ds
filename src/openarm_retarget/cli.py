@@ -774,10 +774,18 @@ def inpaint_static_camera_command(
     output: Path,
     protected_masks: Path | None = None,
     fallback_video: Path | None = typer.Option(
-        None, help="Neural inpaint used where the clean plate is missing or disagrees"
+        None, help="Frame-aligned neural inpaint used only where the real plate is unreliable"
     ),
-    fallback_disagreement_threshold: float = typer.Option(0.08, min=0, max=1),
-    sample_stride: int = typer.Option(5, min=1),
+    reference_image: Path | None = typer.Option(
+        None, help="Reusable empty-scene or one-time-inpainted clean reference image"
+    ),
+    maximum_clean_mad: float = typer.Option(
+        0.04, min=0, max=1, help="Maximum normalized temporal MAD for trusting the real plate"
+    ),
+    fallback_context_radius: int = typer.Option(
+        24, min=0, help="Full-strength then feathered fallback context around unreliable pixels"
+    ),
+    sample_stride: int = typer.Option(10, min=1),
     minimum_clean_observations: int = typer.Option(3, min=1),
     fallback_radius: int = typer.Option(7, min=1),
     feather_radius: int = typer.Option(1, min=0),
@@ -789,7 +797,9 @@ def inpaint_static_camera_command(
             output,
             protected_mask_dir=protected_masks,
             fallback_video=fallback_video,
-            fallback_disagreement_threshold=fallback_disagreement_threshold,
+            reference_image=reference_image,
+            maximum_clean_mad=maximum_clean_mad,
+            fallback_context_radius=fallback_context_radius,
             sample_stride=sample_stride,
             minimum_clean_observations=minimum_clean_observations,
             fallback_radius=fallback_radius,
@@ -811,6 +821,10 @@ def refine_removal_masks(
     protect_margin: int = 2,
     optical_flow: bool = True,
     protect_convex_hull: bool = True,
+    subtract_protected_masks: bool = typer.Option(
+        False,
+        help="Legacy mode: exclude protected pixels before inpainting instead of restoring later",
+    ),
 ) -> None:
     typer.echo(
         refine_robot_masks(
@@ -823,6 +837,7 @@ def refine_removal_masks(
             protect_margin=protect_margin,
             use_optical_flow=optical_flow,
             protect_convex_hull=protect_convex_hull,
+            subtract_protected_masks=subtract_protected_masks,
         )
     )
 

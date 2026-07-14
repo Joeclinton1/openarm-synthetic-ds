@@ -316,6 +316,121 @@ def test_static_camera_uses_neural_fallback_only_for_never_seen_pixels(tmp_path)
     assert 30 < float(np.mean(recovered[:6, :6])) < 55
 
 
+def test_static_camera_uses_frame_aligned_neural_fallback(tmp_path) -> None:
+    source = tmp_path / "source.mp4"
+    fallback = tmp_path / "fallback.mp4"
+    masks = tmp_path / "masks"
+    masks.mkdir()
+    source_writer = cv2.VideoWriter(str(source), cv2.VideoWriter_fourcc(*"mp4v"), 10, (32, 24))
+    fallback_writer = cv2.VideoWriter(str(fallback), cv2.VideoWriter_fourcc(*"mp4v"), 10, (32, 24))
+    values = [50, 90, 130, 170]
+    for index, value in enumerate(values):
+        frame = np.full((24, 32, 3), 30, dtype=np.uint8)
+        frame[8:16, 12:20] = 230
+        source_writer.write(frame)
+        candidate = np.full_like(frame, 30)
+        candidate[8:16, 12:20] = value
+        fallback_writer.write(candidate)
+        mask = np.zeros((24, 32), dtype=np.uint8)
+        mask[8:16, 12:20] = 255
+        cv2.imwrite(str(masks / f"{index:06d}.png"), mask)
+    source_writer.release()
+    fallback_writer.release()
+
+    output = inpaint_static_camera(
+        source,
+        masks,
+        tmp_path / "clean.mp4",
+        fallback_video=fallback,
+        sample_stride=1,
+        feather_radius=0,
+    )
+    capture = cv2.VideoCapture(str(output))
+    recovered = []
+    while True:
+        ok, frame = capture.read()
+        if not ok:
+            break
+        recovered.append(float(np.mean(frame[10:14, 14:18])))
+    capture.release()
+    assert len(recovered) == len(values)
+    assert all(abs(actual - expected) < 15 for actual, expected in zip(recovered, values))
+    assert recovered[-1] - recovered[0] > 90
+
+
+def test_static_camera_uses_reusable_reference_image(tmp_path) -> None:
+    source = tmp_path / "source.mp4"
+    reference = tmp_path / "reference.png"
+    masks = tmp_path / "masks"
+    masks.mkdir()
+    writer = cv2.VideoWriter(str(source), cv2.VideoWriter_fourcc(*"mp4v"), 10, (32, 24))
+    for index in range(4):
+        frame = np.full((24, 32, 3), 30, dtype=np.uint8)
+        frame[8:16, 12:20] = 230
+        writer.write(frame)
+        mask = np.zeros((24, 32), dtype=np.uint8)
+        mask[8:16, 12:20] = 255
+        cv2.imwrite(str(masks / f"{index:06d}.png"), mask)
+    writer.release()
+    clean_reference = np.full((24, 32, 3), 30, dtype=np.uint8)
+    clean_reference[8:16, 12:20] = 75
+    cv2.imwrite(str(reference), clean_reference)
+
+    output = inpaint_static_camera(
+        source,
+        masks,
+        tmp_path / "clean.mp4",
+        reference_image=reference,
+        sample_stride=1,
+        feather_radius=0,
+        fallback_context_radius=0,
+    )
+    capture = cv2.VideoCapture(str(output))
+    ok, recovered = capture.read()
+    capture.release()
+    assert ok
+    assert 60 < float(np.mean(recovered[10:14, 14:18])) < 90
+    manifest = json.loads(output.with_suffix(".static.json").read_text())
+    assert manifest["reference_image"] == str(reference.resolve())
+    assert manifest["fallback_video"] is None
+
+
+def test_static_camera_does_not_replace_reliable_plate_on_neural_disagreement(tmp_path) -> None:
+    source = tmp_path / "source.mp4"
+    fallback = tmp_path / "fallback.mp4"
+    masks = tmp_path / "masks"
+    masks.mkdir()
+    source_writer = cv2.VideoWriter(str(source), cv2.VideoWriter_fourcc(*"mp4v"), 10, (32, 24))
+    fallback_writer = cv2.VideoWriter(str(fallback), cv2.VideoWriter_fourcc(*"mp4v"), 10, (32, 24))
+    for index in range(5):
+        frame = np.full((24, 32, 3), 45, dtype=np.uint8)
+        mask = np.zeros((24, 32), dtype=np.uint8)
+        if index == 2:
+            frame[8:16, 12:20] = 230
+            mask[8:16, 12:20] = 255
+        source_writer.write(frame)
+        fallback_writer.write(np.full_like(frame, 180))
+        cv2.imwrite(str(masks / f"{index:06d}.png"), mask)
+    source_writer.release()
+    fallback_writer.release()
+
+    output = inpaint_static_camera(
+        source,
+        masks,
+        tmp_path / "clean.mp4",
+        fallback_video=fallback,
+        sample_stride=1,
+        minimum_clean_observations=3,
+        feather_radius=0,
+    )
+    capture = cv2.VideoCapture(str(output))
+    capture.set(cv2.CAP_PROP_POS_FRAMES, 2)
+    ok, recovered = capture.read()
+    capture.release()
+    assert ok
+    assert 35 < float(np.mean(recovered[9:15, 13:19])) < 60
+
+
 def test_render_validation_rejects_offscreen_robot(tmp_path) -> None:
     empty = np.zeros((20, 30, 4), dtype=np.uint8)
     cv2.imwrite(str(tmp_path / "000000.png"), empty)
@@ -577,11 +692,43 @@ def test_refine_masks_closes_dilates_and_protects_object(tmp_path) -> None:
         closing_radius=1,
         protect_margin=0,
         use_optical_flow=False,
+        subtract_protected_masks=True,
     )
     assert manifest.is_file()
     result = cv2.imread(str(refined / "000001.png"), cv2.IMREAD_GRAYSCALE)
     assert result[7, 12] == 255
     assert np.all(result[10:14, 15:18] == 0)
+
+
+def test_refine_masks_keeps_contact_region_in_removal_by_default(tmp_path) -> None:
+    video = tmp_path / "source.mp4"
+    raw = tmp_path / "raw"
+    protected = tmp_path / "protected"
+    refined = tmp_path / "refined"
+    raw.mkdir()
+    protected.mkdir()
+    writer = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (32, 24))
+    writer.write(np.full((24, 32, 3), 80, dtype=np.uint8))
+    writer.release()
+    removal = np.zeros((24, 32), dtype=np.uint8)
+    removal[6:18, 10:22] = 255
+    keep = np.zeros_like(removal)
+    keep[10:16, 14:20] = 255
+    cv2.imwrite(str(raw / "000000.png"), removal)
+    cv2.imwrite(str(protected / "000000.png"), keep)
+
+    refine_robot_masks(
+        video,
+        raw,
+        refined,
+        protected_mask_dir=protected,
+        dilation_radius=0,
+        closing_radius=0,
+        protect_margin=0,
+        use_optical_flow=False,
+    )
+    result = cv2.imread(str(refined / "000000.png"), cv2.IMREAD_GRAYSCALE)
+    assert np.all(result[10:16, 14:20] == 255)
 
 
 def test_validate_inpainting_accepts_clean_static_reconstruction(tmp_path) -> None:
@@ -754,6 +901,7 @@ def test_fragmented_protected_object_is_filled_before_subtraction(tmp_path) -> N
         closing_radius=0,
         protect_margin=0,
         use_optical_flow=False,
+        subtract_protected_masks=True,
     )
     result = cv2.imread(str(refined / "000000.png"), cv2.IMREAD_GRAYSCALE)
     assert result[11, 15] == 0
