@@ -23,6 +23,12 @@ calibrated: false
 gripper_mode: closure_position
 gripper_open_value: 34.7
 gripper_closed_value: 117.3
+# The measured effector state is recorded as delayed zero-order-held updates. Detect each
+# event from that channel, then use the one-second motion duration measured in the synced
+# hand/head videos. Do not animate the earlier binary action targets.
+gripper_interpolation: held_state_smoothstep
+gripper_interpolation_max_gap_s: 3.0
+gripper_transition_duration_s: 1.0
 preserve_pinch_center: true
 fields:
   timestamp: /timestamp

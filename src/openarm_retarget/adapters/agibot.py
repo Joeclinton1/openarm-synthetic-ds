@@ -12,6 +12,47 @@ from ..poses import pose_to_matrix
 from ..schema import Episode, SourceConfig
 
 
+def _interpolate_held_gripper_state(
+    values: np.ndarray,
+    timestamp: np.ndarray,
+    max_gap_s: float,
+    transition_duration_s: float,
+) -> np.ndarray:
+    """Reconstruct continuous motion envelopes from delayed zero-order-held state.
+
+    Each cluster identifies a real open/close event and its settled endpoint. Motion starts
+    at the first measured change and follows a fixed-duration smoothstep to that endpoint.
+    Intermediate held amplitudes are retained in diagnostics, but are not treated as
+    frame-synchronous jaw widths because AgiBot records them well after the visible motion.
+    """
+    if max_gap_s <= 0:
+        raise ValueError("gripper_interpolation_max_gap_s must be positive")
+    if transition_duration_s <= 0:
+        raise ValueError("gripper_transition_duration_s must be positive")
+    state = np.asarray(values, dtype=np.float64)
+    time = np.asarray(timestamp, dtype=np.float64)
+    if state.ndim != 2 or state.shape[0] != len(time):
+        raise ValueError("gripper state must have shape [frames, grippers]")
+    result = state.copy()
+    for column in range(state.shape[1]):
+        signal = state[:, column]
+        changes = np.flatnonzero(np.abs(np.diff(signal)) > 1e-12) + 1
+        if not len(changes):
+            continue
+        boundaries = np.flatnonzero(np.diff(time[changes]) > max_gap_s) + 1
+        for group in np.split(changes, boundaries):
+            anchor = max(int(group[0]) - 1, 0)
+            region = np.arange(anchor, int(group[-1]) + 1)
+            phase = np.clip(
+                (time[region] - time[anchor]) / transition_duration_s, 0.0, 1.0
+            )
+            smoothstep = phase * phase * (3.0 - 2.0 * phase)
+            result[region, column] = signal[anchor] + (
+                signal[int(group[-1])] - signal[anchor]
+            ) * smoothstep
+    return result
+
+
 def load_agibot_h5(
     path: str | Path,
     config: SourceConfig,
@@ -48,10 +89,24 @@ def load_agibot_h5(
         if abs(span) < 1e-9:
             raise ValueError("gripper open and closed values must differ")
         gripper = np.clip((gripper - config.gripper_open_value) / span, 0, 1)
+        raw_normalized_gripper = gripper.copy()
+        if config.gripper_interpolation == "held_state_smoothstep":
+            gripper = _interpolate_held_gripper_state(
+                gripper,
+                timestamp,
+                config.gripper_interpolation_max_gap_s,
+                config.gripper_transition_duration_s,
+            )
+        elif config.gripper_interpolation != "none":
+            raise ValueError(
+                f"Unsupported gripper interpolation: {config.gripper_interpolation}"
+            )
         gripper_width_m = closure_to_aperture(gripper)
     elif np.nanmax(gripper) > 1:
         gripper /= max(float(np.nanpercentile(gripper, 99)), 1e-6)
     diagnostics = {}
+    if config.gripper_mode == "closure_position":
+        diagnostics["gripper_raw_normalized"] = raw_normalized_gripper
     if config.preserve_pinch_center:
         offset = _source_pinch_offset_in_openarm_frame(config, gripper)
         pose, diagnostics["pinch_center_target_m"] = preserve_pinch_center(pose, gripper, offset)
@@ -72,6 +127,9 @@ def load_agibot_h5(
             "gripper_calibration": "physical_width_m"
             if gripper_width_m is not None
             else "normalized_only",
+            "gripper_interpolation": config.gripper_interpolation,
+            "gripper_interpolation_max_gap_s": config.gripper_interpolation_max_gap_s,
+            "gripper_transition_duration_s": config.gripper_transition_duration_s,
         },
     )
     episode.validate()
