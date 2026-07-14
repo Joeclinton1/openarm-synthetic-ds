@@ -301,6 +301,71 @@ def refine_robot_masks(
     return path
 
 
+def refine_protected_masks(
+    mask_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    closing_radius: int = 3,
+    dilation_radius: int = 2,
+    minimum_hull_area: int = 20,
+) -> Path:
+    """Fill transparent-object masks per component without bridging separate objects."""
+    if min(closing_radius, dilation_radius, minimum_hull_area) < 0:
+        raise ValueError("Mask refinement parameters must be non-negative")
+    inputs = sorted(Path(mask_dir).glob("*.png"))
+    if not inputs:
+        raise ValueError("No protected-object masks found")
+    destination = Path(output_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    close_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * closing_radius + 1, 2 * closing_radius + 1)
+    )
+    dilate_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * dilation_radius + 1, 2 * dilation_radius + 1)
+    )
+    area_growth: list[float] = []
+    for index, path in enumerate(inputs):
+        mask = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            raise FileNotFoundError(path)
+        binary = (mask > 0).astype(np.uint8)
+        if closing_radius:
+            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, close_kernel)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
+        filled = np.zeros_like(binary)
+        for component in range(1, count):
+            component_mask = (labels == component).astype(np.uint8)
+            if int(stats[component, cv2.CC_STAT_AREA]) >= minimum_hull_area:
+                contours, _ = cv2.findContours(
+                    component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+                for contour in contours:
+                    cv2.drawContours(filled, [cv2.convexHull(contour)], -1, 1, thickness=-1)
+            else:
+                filled |= component_mask
+        if dilation_radius:
+            filled = cv2.dilate(filled, dilate_kernel)
+        before = max(int(np.count_nonzero(binary)), 1)
+        area_growth.append(float(np.count_nonzero(filled) / before))
+        if not cv2.imwrite(str(destination / f"{index:06d}.png"), filled * 255):
+            raise RuntimeError(f"Could not write protected mask {index:06d}")
+    manifest = {
+        "schema": "openarm-protected-mask-refinement-v1",
+        "method": "per-component closing, convex fill, and dilation",
+        "input": str(Path(mask_dir).resolve()),
+        "frames": len(inputs),
+        "closing_radius": closing_radius,
+        "dilation_radius": dilation_radius,
+        "minimum_hull_area": minimum_hull_area,
+        "mean_area_growth": float(np.mean(area_growth)),
+        "maximum_area_growth": float(np.max(area_growth)),
+    }
+    (destination / "protected_mask_manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n"
+    )
+    return destination
+
+
 def validate_robot_masks(
     video_path: str | Path,
     mask_dir: str | Path,
@@ -1212,6 +1277,8 @@ def composite_rgba(
     source_depth_m: np.ndarray | None = None,
     render_depth_m: np.ndarray | None = None,
     depth_tolerance_m: float = 0.01,
+    *,
+    linear_light: bool = True,
 ) -> np.ndarray:
     if background.shape[:2] != foreground_rgba.shape[:2]:
         raise ValueError("Background and foreground must have equal resolution")
@@ -1228,9 +1295,27 @@ def composite_rgba(
         robot_behind_scene = known_source & (render_depth_m > source_depth_m + depth_tolerance_m)
         alpha = alpha.copy()
         alpha[robot_behind_scene] = 0
-    return np.clip(foreground_rgba[..., :3] * alpha + background * (1 - alpha), 0, 255).astype(
-        np.uint8
-    )
+    foreground = foreground_rgba[..., :3].astype(np.float32) / 255.0
+    backdrop = background.astype(np.float32) / 255.0
+    if linear_light:
+        foreground = np.where(
+            foreground <= 0.04045,
+            foreground / 12.92,
+            ((foreground + 0.055) / 1.055) ** 2.4,
+        )
+        backdrop = np.where(
+            backdrop <= 0.04045,
+            backdrop / 12.92,
+            ((backdrop + 0.055) / 1.055) ** 2.4,
+        )
+    composited = foreground * alpha + backdrop * (1 - alpha)
+    if linear_light:
+        composited = np.where(
+            composited <= 0.0031308,
+            composited * 12.92,
+            1.055 * np.power(composited, 1 / 2.4) - 0.055,
+        )
+    return np.clip(np.rint(composited * 255), 0, 255).astype(np.uint8)
 
 
 def _load_depth_frame(root: Path, index: int) -> np.ndarray:
@@ -1254,8 +1339,13 @@ def composite_video(
     source_depth_dir: str | Path | None = None,
     render_depth_dir: str | Path | None = None,
     depth_tolerance_m: float = 0.01,
+    *,
+    linear_light: bool = True,
+    protected_feather_radius: int = 0,
 ) -> Path:
     """Composite renderer RGBA frames while preserving optional foreground-object masks."""
+    if protected_feather_radius < 0:
+        raise ValueError("protected_feather_radius must be non-negative")
     capture = cv2.VideoCapture(str(background_video))
     fps = capture.get(cv2.CAP_PROP_FPS)
     width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -1283,7 +1373,18 @@ def composite_video(
                 )
                 if protected is None:
                     raise FileNotFoundError(f"Missing protected mask {index:06d}.png")
-                foreground[protected > 0, 3] = 0
+                if protected_feather_radius:
+                    protection = cv2.GaussianBlur(
+                        (protected > 0).astype(np.float32),
+                        (0, 0),
+                        sigmaX=protected_feather_radius,
+                        sigmaY=protected_feather_radius,
+                    )
+                    foreground[..., 3] = np.clip(
+                        np.rint(foreground[..., 3] * (1 - protection)), 0, 255
+                    ).astype(np.uint8)
+                else:
+                    foreground[protected > 0, 3] = 0
             writer.write(
                 composite_rgba(
                     background,
@@ -1291,6 +1392,7 @@ def composite_video(
                     source_depth,
                     render_depth,
                     depth_tolerance_m,
+                    linear_light=linear_light,
                 )
             )
             index += 1
@@ -1797,6 +1899,238 @@ def harmonize_rgba_frames(
     }
     (destination / "harmonization_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return destination
+
+
+def _photometric_samples(
+    source_video: str | Path,
+    source_robot_mask_dir: str | Path,
+    rgba_dir: str | Path,
+    *,
+    protected_mask_dir: str | Path | None = None,
+    sample_stride: int = 15,
+    pixel_stride: int = 4,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Collect deterministic source/render samples for episode-level light calibration."""
+    if sample_stride < 1 or pixel_stride < 1:
+        raise ValueError("sample_stride and pixel_stride must be positive")
+    info = _video_info(source_video)
+    width, height = int(info["width"]), int(info["height"])
+    rgba_root = Path(rgba_dir)
+    mask_root = Path(source_robot_mask_dir)
+    protected_root = Path(protected_mask_dir) if protected_mask_dir is not None else None
+    source_values: list[np.ndarray] = []
+    render_values: list[np.ndarray] = []
+    sampled_frames = 0
+    for index, source in enumerate(_iter_bgr_frames(source_video, width, height)):
+        if index % sample_stride:
+            continue
+        rgba = cv2.imread(str(rgba_root / f"{index:06d}.png"), cv2.IMREAD_UNCHANGED)
+        if rgba is None or rgba.shape != (height, width, 4):
+            raise FileNotFoundError(f"Missing or invalid RGBA frame {index:06d}.png")
+        source_mask = _binary_mask(mask_root / f"{index:06d}.png", (height, width)) > 0
+        render_mask = rgba[..., 3] >= 224
+        if protected_root is not None:
+            protected = _binary_mask(
+                protected_root / f"{index:06d}.png", (height, width)
+            ) > 0
+            source_mask &= ~protected
+            render_mask &= ~protected
+        source_pixels = source[source_mask]
+        render_pixels = rgba[..., :3][render_mask]
+        if len(source_pixels) < 32 or len(render_pixels) < 32:
+            continue
+        source_values.append(source_pixels[::pixel_stride])
+        render_values.append(render_pixels[::pixel_stride])
+        sampled_frames += 1
+    if not source_values or not render_values:
+        raise RuntimeError("No usable source/render robot pixels for photometric calibration")
+    return np.concatenate(source_values), np.concatenate(render_values), sampled_frames
+
+
+def _srgb_float_to_linear(values: np.ndarray) -> np.ndarray:
+    values = values.astype(np.float32) / 255.0
+    return np.where(values <= 0.04045, values / 12.92, ((values + 0.055) / 1.055) ** 2.4)
+
+
+def _linear_float_to_u8(values: np.ndarray) -> np.ndarray:
+    encoded = np.where(
+        values <= 0.0031308,
+        values * 12.92,
+        1.055 * np.power(np.maximum(values, 0), 1 / 2.4) - 0.055,
+    )
+    return np.clip(np.rint(encoded * 255), 0, 255).astype(np.uint8)
+
+
+def _photometric_score(source_pixels: np.ndarray, render_pixels: np.ndarray) -> dict:
+    quantiles = np.array([5, 10, 20, 35, 50, 65, 80, 90, 95], dtype=np.float32)
+    source_q = np.percentile(source_pixels, quantiles, axis=0)
+    render_q = np.percentile(render_pixels, quantiles, axis=0)
+    source_linear = _srgb_float_to_linear(source_pixels)
+    render_linear = _srgb_float_to_linear(render_pixels)
+    bgr_luma = np.array([0.0722, 0.7152, 0.2126], dtype=np.float32)
+    source_luma = source_linear @ bgr_luma
+    render_luma = render_linear @ bgr_luma
+    source_luma_q = np.percentile(source_luma, quantiles)
+    render_luma_q = np.percentile(render_luma, quantiles)
+    channel_error = float(np.mean(np.abs(source_q - render_q)) / 255.0)
+    luma_error = float(np.mean(np.abs(source_luma_q - render_luma_q)))
+    return {
+        "score": 0.65 * luma_error + 0.35 * channel_error,
+        "linear_luma_quantile_mae": luma_error,
+        "channel_quantile_mae_255": channel_error * 255.0,
+        "source_channel_quantiles": source_q.tolist(),
+        "render_channel_quantiles": render_q.tolist(),
+    }
+
+
+def calibrate_rgba_photometry(
+    source_video: str | Path,
+    source_robot_mask_dir: str | Path,
+    rgba_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    protected_mask_dir: str | Path | None = None,
+    sample_stride: int = 15,
+    strength: float = 0.9,
+) -> Path:
+    """Match a transparent render to source illumination without changing alpha or geometry.
+
+    A single bounded exposure/tone/white-balance transform is estimated from robot pixels across
+    the episode. Applying one transform avoids per-frame pumping while retaining source-derived
+    warmth and highlight range. All fitting and application happens in linear-light RGB.
+    """
+    if not 0 <= strength <= 1:
+        raise ValueError("strength must be in [0,1]")
+    source_pixels, render_pixels, sampled_frames = _photometric_samples(
+        source_video,
+        source_robot_mask_dir,
+        rgba_dir,
+        protected_mask_dir=protected_mask_dir,
+        sample_stride=sample_stride,
+    )
+    source_linear = _srgb_float_to_linear(source_pixels)
+    render_linear = _srgb_float_to_linear(render_pixels)
+    bgr_luma = np.array([0.0722, 0.7152, 0.2126], dtype=np.float32)
+    source_luma = source_linear @ bgr_luma
+    render_luma = render_linear @ bgr_luma
+    quantiles = [5, 10, 20, 35, 50, 65, 80, 90, 95]
+    source_q = np.percentile(source_luma, quantiles)
+    render_q = np.percentile(render_luma, quantiles)
+    # Collapse repeated shadow quantiles before interpolation. This is common with 8-bit dark
+    # renders and avoids an unstable high-gain power fit that would lift true black material.
+    tone_input, inverse = np.unique(render_q, return_inverse=True)
+    tone_output = np.array(
+        [np.mean(source_q[inverse == index]) for index in range(len(tone_input))]
+    )
+    tone_input = np.concatenate(([0.0], tone_input, [1.0]))
+    tone_output = np.concatenate(([0.0], tone_output, [1.0]))
+    tone_output = np.maximum.accumulate(np.clip(tone_output, 0, 1))
+
+    source_mid = source_linear[(source_luma >= np.percentile(source_luma, 25)) & (source_luma <= np.percentile(source_luma, 85))]
+    render_mid = render_linear[(render_luma >= np.percentile(render_luma, 25)) & (render_luma <= np.percentile(render_luma, 85))]
+    source_chroma = np.mean(source_mid, axis=0) / max(float(np.mean(source_mid)), 1e-6)
+    render_chroma = np.mean(render_mid, axis=0) / max(float(np.mean(render_mid)), 1e-6)
+    white_balance = np.clip(source_chroma / np.maximum(render_chroma, 1e-6), 0.82, 1.18)
+    # Keep the balance energy-neutral so exposure is controlled only by the luma fit.
+    white_balance /= float(np.dot(white_balance, bgr_luma))
+
+    def apply_transform(linear: np.ndarray) -> np.ndarray:
+        luma = linear @ bgr_luma
+        target_luma = np.interp(luma, tone_input, tone_output)
+        ratio = np.divide(target_luma, np.maximum(luma, 1e-6))
+        matched = linear * ratio[..., None] * white_balance
+        return (1 - strength) * linear + strength * matched
+
+    destination = Path(output_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    paths = sorted(Path(rgba_dir).glob("*.png"))
+    if not paths:
+        raise ValueError("No RGBA frames to calibrate")
+    for index, path in enumerate(paths):
+        rgba = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        if rgba is None or rgba.ndim != 3 or rgba.shape[-1] != 4:
+            raise ValueError(f"Invalid RGBA frame: {path}")
+        linear = _srgb_float_to_linear(rgba[..., :3])
+        linear = apply_transform(linear)
+        result = rgba.copy()
+        result[..., :3] = _linear_float_to_u8(np.clip(linear, 0, 1))
+        if not cv2.imwrite(
+            str(destination / f"{index:06d}.png"),
+            result,
+            [cv2.IMWRITE_PNG_COMPRESSION, 3],
+        ):
+            raise RuntimeError(f"Could not write calibrated frame {index}")
+    candidate_pixels = _linear_float_to_u8(np.clip(apply_transform(render_linear), 0, 1))
+    manifest = {
+        "schema": "openarm-photometric-calibration-v2",
+        "method": "episode-global bounded linear-light exposure, tone, and white balance",
+        "source_video": str(Path(source_video).resolve()),
+        "source_robot_masks": str(Path(source_robot_mask_dir).resolve()),
+        "input_rgba": str(Path(rgba_dir).resolve()),
+        "frames": len(paths),
+        "sampled_frames": sampled_frames,
+        "sample_stride": sample_stride,
+        "strength": strength,
+        "tone_input_linear": tone_input.tolist(),
+        "tone_output_linear": tone_output.tolist(),
+        "white_balance_bgr": white_balance.tolist(),
+        "before": _photometric_score(source_pixels, render_pixels),
+        "after": _photometric_score(source_pixels, candidate_pixels),
+        "geometry_modified": False,
+        "alpha_modified": False,
+        "generative": False,
+    }
+    (destination / "photometric_calibration.json").write_text(
+        json.dumps(manifest, indent=2) + "\n"
+    )
+    return destination
+
+
+def validate_photometric_calibration(
+    source_video: str | Path,
+    source_robot_mask_dir: str | Path,
+    reference_rgba_dir: str | Path,
+    candidate_rgba_dir: str | Path,
+    *,
+    protected_mask_dir: str | Path | None = None,
+    sample_stride: int = 15,
+    minimum_relative_improvement: float = 0.1,
+) -> dict:
+    """Require a measurable source-match improvement with an identical renderer alpha."""
+    source, reference, sampled = _photometric_samples(
+        source_video,
+        source_robot_mask_dir,
+        reference_rgba_dir,
+        protected_mask_dir=protected_mask_dir,
+        sample_stride=sample_stride,
+    )
+    source_candidate, candidate, candidate_sampled = _photometric_samples(
+        source_video,
+        source_robot_mask_dir,
+        candidate_rgba_dir,
+        protected_mask_dir=protected_mask_dir,
+        sample_stride=sample_stride,
+    )
+    before = _photometric_score(source, reference)
+    after = _photometric_score(source_candidate, candidate)
+    relative_improvement = (before["score"] - after["score"]) / max(before["score"], 1e-9)
+    alpha = validate_harmonized_rgba(reference_rgba_dir, candidate_rgba_dir)
+    errors = list(alpha["errors"])
+    if relative_improvement < minimum_relative_improvement:
+        errors.append(
+            f"relative improvement {relative_improvement:.4f} is below "
+            f"{minimum_relative_improvement:.4f}"
+        )
+    return {
+        "ok": not errors,
+        "sampled_frames": min(sampled, candidate_sampled),
+        "before": before,
+        "after": after,
+        "relative_improvement": relative_improvement,
+        "minimum_relative_improvement": minimum_relative_improvement,
+        "alpha_validation": alpha,
+        "errors": errors,
+    }
 
 
 def validate_harmonized_rgba(

@@ -215,11 +215,19 @@ Operational sequence:
    stored intrinsics are scaled explicitly when calibration and video resolutions differ.
 4. Export official meshes and FK with `blender-scene`. Render resumable transparent RGBA and
    optional metric depth with `render-blender-batch`, then run `validate-render` and
-   `validate-render-depth`. Apply source lens distortion only after projection validation.
-5. Composite with protected-object masks. Occlusion and renderer alpha own geometry.
-6. Optionally run `harmonize-render`, or generate VACE windows with `style-vace-batch`. Apply
-   `constrain-style-batch`, independently segment the result, and accept only clips passing
-   `validate-style-refinement`; otherwise retain the deterministic composite.
+   `validate-render-depth`. The Blender driver supports aimed, colour-temperature-controlled area
+   lights and an optional equirectangular HDR probe. Attach a recovered probe without changing any
+   geometry using `configure-blender-hdri`. Apply source lens distortion only after projection
+   validation.
+5. Run `calibrate-render-lighting` against the source robot track. It fits one bounded
+   episode-global tone and white-balance transform in linear light, preserving alpha exactly and
+   avoiding temporal pumping. Require a measurable improvement with `validate-render-lighting`.
+6. Composite with protected-object masks. Occlusion and renderer alpha own geometry; alpha-over
+   is performed in linear light by default. Retained source contact shading is not duplicated with
+   an unconditional synthetic shadow catcher.
+7. `harmonize-render` remains a weaker local-context fallback. A generative VACE pass is optional:
+   constrain it with `constrain-style-batch`, independently segment the result, and accept only
+   clips passing `validate-style-refinement`; otherwise retain the deterministic composite.
 
 Gripper-object contact remains the hardest image region because pixels hidden by the source arm
 were never observed. Protected-object masks and depth are therefore release requirements, not
@@ -289,6 +297,7 @@ The full visual fixture is AgiBot episode `649684` at 1,026 frames and 640x480:
 | EEVEE geometry | 0.9595 mean IoU against Cycles; deterministic decoded pixels. |
 | Gripper contact geometry (corrected replay) | 1,018/1,026 retained frames; 6.91 mm p95 / 9.73 mm maximum pinch-midpoint error; physical jaw aperture error below 1.3e-16 m. |
 | Deterministic composite | 0.00836 outside-region MAE; 0.00821 protected-object MAE. |
+| Source-calibrated HDRI lighting | A DiffusionLight Turbo probe plus bounded linear-light calibration reduced the active-arm photometric score from 0.10204 to 0.01060 (89.6%); silhouette IoU and post-calibration alpha were exactly 1.0 across all 1,026 frames. |
 | VACE refinement | 0.9057 independent RobotSeg IoU; 0.00837 background MAE; 0.00800 protected-object MAE; 0.0839 px flow error. |
 
 The corrected gripper replay uses AgiBot's source-reported millimetre opening and the fixture's
@@ -340,6 +349,8 @@ The visual architecture follows geometry-preserving embodiment work:
 | [H2R-Grounder](https://arxiv.org/abs/2512.09406) | Closest learned in-context approach; requires a target-specific LoRA trained on real target-robot video. |
 | [EgoDemoGen](https://arxiv.org/abs/2509.22578), [RoVi-Aug](https://rovi-aug.github.io/) | Learned translators improve appearance but require substantial target data or pair-specific training. |
 | [VACE](https://github.com/ali-vilab/VACE) | Locally feasible temporal editor, but raw output changes preserved pixels and must remain constrained and rejectable. |
+| [Debevec image-based lighting](https://www.pauldebevec.com/Research/IBL/), [Blender colour management](https://docs.blender.org/manual/en/latest/render/color_management.html) | HDR environment lighting, explicit display transforms, and linear-light compositing are the deterministic CGI baseline. |
+| [DiffusionLight Turbo](https://github.com/DiffusionLight/DiffusionLight-Turbo) | The full fixture uses its single-image, exposure-bracketed HDR probe for structured metal reflections; the fast source-calibration fallback remains usable without it. |
 
 Consequently, calibrated render-and-composite is the accepted output. VACE is only a bounded RGB
 refinement beneath exact robot alpha and outside protected objects. A future OpenArm-specific

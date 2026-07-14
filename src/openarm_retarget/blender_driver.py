@@ -75,7 +75,10 @@ def main() -> None:
     scene.render.image_settings.color_mode = "RGBA"
     scene.render.image_settings.color_depth = "8"
     scene.render.image_settings.compression = int(spec.get("png_compression", 15))
-    scene.view_settings.look = "AgX - Medium High Contrast"
+    color_management = spec.get("color_management", {})
+    scene.view_settings.view_transform = color_management.get("view_transform", "AgX")
+    scene.view_settings.look = color_management.get("look", "AgX - Medium High Contrast")
+    scene.view_settings.exposure = float(color_management.get("exposure", 0.0))
     scene.render.resolution_x, scene.render.resolution_y = spec["resolution"]
     scene.render.resolution_percentage = 100
     scene.render.fps = round(spec["fps"])
@@ -103,12 +106,29 @@ def main() -> None:
     scene.world = world
     world.use_nodes = True
     lighting = spec.get("lighting", {})
-    world.node_tree.nodes["Background"].inputs["Color"].default_value = lighting.get(
+    world_nodes = world.node_tree.nodes
+    world_links = world.node_tree.links
+    background = world_nodes.get("Background")
+    background.inputs["Color"].default_value = lighting.get(
         "world_color_linear", (0.12, 0.12, 0.12, 1)
     )
-    world.node_tree.nodes["Background"].inputs["Strength"].default_value = lighting.get(
-        "world_strength", 0.35
-    )
+    background.inputs["Strength"].default_value = lighting.get("world_strength", 0.35)
+    environment_path = lighting.get("environment_path")
+    if environment_path:
+        environment = world_nodes.new("ShaderNodeTexEnvironment")
+        resolved_environment = Path(environment_path)
+        if not resolved_environment.is_absolute():
+            resolved_environment = args.scene.parent / resolved_environment
+        environment.image = bpy.data.images.load(str(resolved_environment), check_existing=True)
+        environment.interpolation = "Linear"
+        mapping = world_nodes.new("ShaderNodeMapping")
+        coordinates = world_nodes.new("ShaderNodeTexCoord")
+        mapping.inputs["Rotation"].default_value[2] = float(
+            lighting.get("environment_rotation_rad", 0.0)
+        )
+        world_links.new(coordinates.outputs["Generated"], mapping.inputs["Vector"])
+        world_links.new(mapping.outputs["Vector"], environment.inputs["Vector"])
+        world_links.new(environment.outputs["Color"], background.inputs["Color"])
 
     imported = []
     for item in spec["objects"]:
@@ -172,8 +192,15 @@ def main() -> None:
         light_data.energy = float(light_spec["energy_w"])
         light_data.shape = "DISK"
         light_data.size = float(light_spec["size_m"])
+        color = light_spec.get("color_srgb", (1.0, 1.0, 1.0))
+        light_data.color = tuple(_srgb_to_linear(value) for value in color)
         light = bpy.data.objects.new(f"softbox_{index}", light_data)
         light.location = light_spec["location"]
+        if "target" in light_spec:
+            from mathutils import Vector
+
+            direction = Vector(light_spec["target"]) - light.location
+            light.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
         scene.collection.objects.link(light)
 
     frame_count = int(spec["episode_frames"])

@@ -27,6 +27,7 @@ from .ik_compare import compare_ik_episode, package_ik_review_videos
 from .media import (
     apply_mask_constrained_style,
     apply_mask_constrained_style_batch,
+    calibrate_rgba_photometry,
     composite_video,
     distort_rgba_frames,
     distort_depth_frames,
@@ -35,11 +36,13 @@ from .media import (
     inpaint_propainter,
     inpaint_static_camera,
     inpaint_video,
+    refine_protected_masks,
     refine_robot_masks,
     restore_protected_video,
     record_style_validation,
     validate_inpainting,
     validate_harmonized_rgba,
+    validate_photometric_calibration,
     validate_depth_render,
     validate_composite_video,
     validate_robot_masks,
@@ -53,7 +56,12 @@ from .media import (
 from .model import fetch_openarm_model
 from .official_ik import OfficialIKConfig
 from .presets import fit_workspace_translation, load_hiw_episode
-from .raytrace import export_blender_scene, render_blender_batch, render_blender_scene
+from .raytrace import (
+    configure_blender_environment,
+    export_blender_scene,
+    render_blender_batch,
+    render_blender_scene,
+)
 from .robotseg import segment_robotseg_video
 from .registration import auto_register_episode
 from .schema import Episode, SourceConfig
@@ -497,6 +505,27 @@ def render_blender(
     typer.echo(render_blender_scene(scene, output, blender, max_frames, device.upper()))
 
 
+@app.command("configure-blender-hdri")
+def configure_blender_hdri_command(
+    scene: Path,
+    output: Path,
+    environment: Path,
+    strength: float = typer.Option(0.7, min=0.01),
+    rotation_rad: float = 0.0,
+    area_light_scale: float = typer.Option(0.25, min=0.0),
+) -> None:
+    typer.echo(
+        configure_blender_environment(
+            scene,
+            output,
+            environment,
+            strength=strength,
+            rotation_rad=rotation_rad,
+            area_light_scale=area_light_scale,
+        )
+    )
+
+
 @app.command("render-blender-batch")
 def render_blender_batch_command(
     scene: Path,
@@ -798,6 +827,25 @@ def refine_removal_masks(
     )
 
 
+@app.command("refine-protected-masks")
+def refine_protected_masks_command(
+    masks: Path,
+    output: Path,
+    closing_radius: int = typer.Option(3, min=0),
+    dilation_radius: int = typer.Option(2, min=0),
+    minimum_hull_area: int = typer.Option(20, min=0),
+) -> None:
+    typer.echo(
+        refine_protected_masks(
+            masks,
+            output,
+            closing_radius=closing_radius,
+            dilation_radius=dilation_radius,
+            minimum_hull_area=minimum_hull_area,
+        )
+    )
+
+
 @app.command("validate-removal-masks")
 def validate_removal_masks(
     video: Path,
@@ -1010,6 +1058,12 @@ def composite(
         None, help="Per-frame Blender metric depth (.npy or .npz)"
     ),
     depth_tolerance_m: float = 0.01,
+    linear_light: bool = typer.Option(
+        True, help="Composite display-encoded inputs in scene-linear light"
+    ),
+    protected_feather_radius: int = typer.Option(
+        0, min=0, help="Soft transition radius for translucent protected objects"
+    ),
 ) -> None:
     typer.echo(
         composite_video(
@@ -1020,6 +1074,8 @@ def composite(
             source_depth,
             render_depth,
             depth_tolerance_m,
+            linear_light=linear_light,
+            protected_feather_radius=protected_feather_radius,
         )
     )
 
@@ -1126,6 +1182,53 @@ def harmonize_render_command(
             temporal_smoothing=temporal_smoothing,
         )
     )
+
+
+@app.command("calibrate-render-lighting")
+def calibrate_render_lighting_command(
+    source_video: Path,
+    source_robot_masks: Path,
+    rgba_frames: Path,
+    output: Path,
+    protected_masks: Path | None = None,
+    sample_stride: int = typer.Option(15, min=1),
+    strength: float = typer.Option(0.9, min=0.0, max=1.0),
+) -> None:
+    typer.echo(
+        calibrate_rgba_photometry(
+            source_video,
+            source_robot_masks,
+            rgba_frames,
+            output,
+            protected_mask_dir=protected_masks,
+            sample_stride=sample_stride,
+            strength=strength,
+        )
+    )
+
+
+@app.command("validate-render-lighting")
+def validate_render_lighting_command(
+    source_video: Path,
+    source_robot_masks: Path,
+    reference_rgba: Path,
+    candidate_rgba: Path,
+    protected_masks: Path | None = None,
+    sample_stride: int = typer.Option(15, min=1),
+    minimum_relative_improvement: float = 0.1,
+) -> None:
+    report = validate_photometric_calibration(
+        source_video,
+        source_robot_masks,
+        reference_rgba,
+        candidate_rgba,
+        protected_mask_dir=protected_masks,
+        sample_stride=sample_stride,
+        minimum_relative_improvement=minimum_relative_improvement,
+    )
+    typer.echo(json.dumps(report, indent=2))
+    if not report["ok"]:
+        raise typer.Exit(code=1)
 
 
 @app.command("validate-harmonization")

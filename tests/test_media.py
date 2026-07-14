@@ -14,6 +14,7 @@ from openarm_retarget.ai_masks import (
 )
 from openarm_retarget.media import (
     apply_mask_constrained_style,
+    calibrate_rgba_photometry,
     composite_rgba,
     distort_rgba_frames,
     distort_depth_frames,
@@ -23,10 +24,12 @@ from openarm_retarget.media import (
     inpaint_video,
     refine_robot_masks,
     record_style_validation,
+    refine_protected_masks,
     restore_protected_video,
     stabilize_masks,
     validate_inpainting,
     validate_harmonized_rgba,
+    validate_photometric_calibration,
     validate_depth_render,
     validate_composite_video,
     validate_robot_masks,
@@ -41,6 +44,13 @@ def test_rgba_composite() -> None:
     background = np.full((1, 1, 3), 10, dtype=np.uint8)
     foreground = np.array([[[110, 210, 10, 128]]], dtype=np.uint8)
     result = composite_rgba(background, foreground)
+    np.testing.assert_allclose(result[0, 0], [80, 154, 10], atol=1)
+
+
+def test_rgba_composite_can_reproduce_legacy_display_encoded_blend() -> None:
+    background = np.full((1, 1, 3), 10, dtype=np.uint8)
+    foreground = np.array([[[110, 210, 10, 128]]], dtype=np.uint8)
+    result = composite_rgba(background, foreground, linear_light=False)
     np.testing.assert_allclose(result[0, 0], [60, 110, 10], atol=1)
 
 
@@ -82,6 +92,22 @@ def test_temporal_mask_stabilization() -> None:
     masks[1][2, 2] = 255
     stable = stabilize_masks(masks, dilation=1, temporal_radius=1)
     assert all(mask[2, 2] == 255 for mask in stable)
+
+
+def test_protected_mask_refinement_fills_components_without_bridging(tmp_path) -> None:
+    masks = tmp_path / "masks"
+    masks.mkdir()
+    mask = np.zeros((32, 40), dtype=np.uint8)
+    cv2.rectangle(mask, (3, 5), (13, 20), 255, thickness=2)
+    cv2.rectangle(mask, (27, 6), (36, 19), 255, thickness=2)
+    cv2.imwrite(str(masks / "000000.png"), mask)
+    output = refine_protected_masks(
+        masks, tmp_path / "refined", closing_radius=1, dilation_radius=0
+    )
+    result = cv2.imread(str(output / "000000.png"), cv2.IMREAD_GRAYSCALE)
+    assert result[12, 8] == 255
+    assert result[12, 31] == 255
+    assert result[12, 20] == 0
 
 
 def test_select_bimanual_robot_boxes_rejects_whole_frame() -> None:
@@ -402,6 +428,37 @@ def test_harmonization_preserves_alpha_exactly(tmp_path) -> None:
     np.testing.assert_array_equal(result[..., 3], image[..., 3])
     assert np.mean(result[7:17, 10:22, :3]) != np.mean(image[7:17, 10:22, :3])
     assert validate_harmonized_rgba(rgba, output)["ok"]
+
+
+def test_source_calibrated_photometry_improves_match_and_preserves_alpha(tmp_path) -> None:
+    video = tmp_path / "source.mp4"
+    masks = tmp_path / "masks"
+    rgba = tmp_path / "rgba"
+    masks.mkdir()
+    rgba.mkdir()
+    writer = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"mp4v"), 10, (64, 48))
+    for index in range(6):
+        source = np.full((48, 64, 3), 30, dtype=np.uint8)
+        source[12:38, 18:48] = [65, 92, 112]
+        writer.write(source)
+        mask = np.zeros((48, 64), dtype=np.uint8)
+        mask[12:38, 18:48] = 255
+        cv2.imwrite(str(masks / f"{index:06d}.png"), mask)
+        render = np.zeros((48, 64, 4), dtype=np.uint8)
+        render[14:36, 20:46] = [18, 18, 18, 255]
+        cv2.imwrite(str(rgba / f"{index:06d}.png"), render)
+    writer.release()
+    output = calibrate_rgba_photometry(
+        video, masks, rgba, tmp_path / "calibrated", sample_stride=1
+    )
+    report = validate_photometric_calibration(
+        video, masks, rgba, output, sample_stride=1, minimum_relative_improvement=0.1
+    )
+    assert report["ok"]
+    assert report["relative_improvement"] > 0.5
+    original = cv2.imread(str(rgba / "000000.png"), cv2.IMREAD_UNCHANGED)
+    calibrated = cv2.imread(str(output / "000000.png"), cv2.IMREAD_UNCHANGED)
+    np.testing.assert_array_equal(original[..., 3], calibrated[..., 3])
 
 
 def test_style_refinement_gate_accepts_identical_video(tmp_path) -> None:

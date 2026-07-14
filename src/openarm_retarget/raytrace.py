@@ -182,6 +182,12 @@ def export_blender_scene(
         "eevee_samples": eevee_samples if samples == 0 else None,
         "png_compression": png_compression,
         "transparent_background": True,
+        "color_management": {
+            "view_transform": "AgX",
+            "look": "AgX - Medium High Contrast",
+            "exposure": 0.0,
+            "rationale": "fixed display transform; source exposure is calibrated after rendering",
+        },
         "gripper": {
             "semantics": "normalized 0=open, 1=closed",
             "finger_joint_order": [
@@ -195,15 +201,29 @@ def export_blender_scene(
             ),
         },
         "lighting": {
+            "preset": "openarm-calibratable-studio-v2",
             "world_color_linear": [0.12, 0.12, 0.12, 1.0],
             "world_strength": 0.35,
             "area_lights": [
-                {"location": [1.4, -1.0, 1.8], "energy_w": 160.0, "size_m": 2.0},
-                {"location": [-1.2, 0.8, 1.2], "energy_w": 100.0, "size_m": 1.5},
+                {
+                    "location": [1.4, -1.0, 1.8],
+                    "target": [0.12, 0.0, -0.05],
+                    "energy_w": 160.0,
+                    "size_m": 2.0,
+                    "color_srgb": [1.0, 0.95, 0.9],
+                },
+                {
+                    "location": [-1.2, 0.8, 1.2],
+                    "target": [0.12, 0.0, -0.05],
+                    "energy_w": 100.0,
+                    "size_m": 1.5,
+                    "color_srgb": [0.9, 0.95, 1.0],
+                },
             ],
             "rationale": (
-                "neutral low-key studio illumination preserving official OpenArm v2 "
-                "matte-black and silver material separation"
+                "aimed broad warm key and cool fill preserve official OpenArm v2 matte-black "
+                "and silver material separation while remaining stable for source calibration; "
+                "environment_path can replace the procedural world with a recovered HDR probe"
             ),
         },
         "camera": camera,
@@ -213,6 +233,50 @@ def export_blender_scene(
     output = destination / "scene.json"
     output.write_text(json.dumps(payload, separators=(",", ":")) + "\n")
     return output
+
+
+def configure_blender_environment(
+    scene: str | Path,
+    output: str | Path,
+    environment: str | Path,
+    *,
+    strength: float = 0.7,
+    rotation_rad: float = 0.0,
+    area_light_scale: float = 0.25,
+) -> Path:
+    """Attach a recovered HDR environment without changing geometry, camera, or animation."""
+    if strength <= 0:
+        raise ValueError("Environment strength must be positive")
+    if area_light_scale < 0:
+        raise ValueError("Area-light scale must be non-negative")
+    scene_path = Path(scene).resolve()
+    environment_path = Path(environment).resolve()
+    if not scene_path.is_file():
+        raise FileNotFoundError(scene_path)
+    if not environment_path.is_file():
+        raise FileNotFoundError(environment_path)
+    payload = json.loads(scene_path.read_text())
+    destination = Path(output).resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.parent != scene_path.parent:
+        for item in payload["objects"]:
+            mesh = Path(item["mesh"])
+            if not mesh.is_absolute():
+                item["mesh"] = str((scene_path.parent / mesh).resolve())
+    lighting = payload.setdefault("lighting", {})
+    lighting["preset"] = "source-recovered-hdri-v1"
+    lighting["environment_path"] = str(environment_path)
+    lighting["environment_rotation_rad"] = float(rotation_rad)
+    lighting["world_strength"] = float(strength)
+    for light in lighting.get("area_lights", []):
+        light["energy_w"] = float(light["energy_w"]) * area_light_scale
+    lighting["environment_provenance"] = {
+        "method": "DiffusionLight Turbo single-image exposure-bracketed probe",
+        "source": str(environment_path),
+        "area_light_scale": float(area_light_scale),
+    }
+    destination.write_text(json.dumps(payload, separators=(",", ":")) + "\n")
+    return destination
 
 
 def render_blender_scene(

@@ -4,7 +4,12 @@ import mujoco
 import numpy as np
 
 from openarm_retarget.ik import OpenArmIK
-from openarm_retarget.raytrace import _frame_ranges, export_blender_scene, render_blender_batch
+from openarm_retarget.raytrace import (
+    _frame_ranges,
+    configure_blender_environment,
+    export_blender_scene,
+    render_blender_batch,
+)
 from openarm_retarget.schema import Episode
 from openarm_retarget.viewer import TrajectoryViewer
 
@@ -32,6 +37,8 @@ def test_blender_scene_contains_official_meshes_and_motion(tmp_path, openarm_mod
     assert payload["engine"] == "CYCLES"
     assert payload["transparent_background"]
     assert payload["lighting"]["world_strength"] == 0.35
+    assert payload["lighting"]["preset"] == "openarm-calibratable-studio-v2"
+    assert payload["color_management"]["exposure"] == 0.0
     assert payload["episode_frames"] == 2
     assert len(payload["objects"]) > 20
     assert all((output.parent / item["mesh"]).is_file() for item in payload["objects"])
@@ -71,6 +78,33 @@ def test_blender_scene_supports_eevee(tmp_path, openarm_model_path) -> None:
     payload = json.loads(output.read_text())
     assert payload["engine"] == "BLENDER_EEVEE_NEXT"
     assert payload["eevee_samples"] == 16
+
+
+def test_blender_environment_configuration_preserves_scene(tmp_path, openarm_model_path) -> None:
+    solver = OpenArmIK(openarm_model_path)
+    joints = np.array([[solver.neutral("right"), solver.neutral("left")]])
+    episode = Episode(
+        timestamp=np.array([0.0]),
+        ee_pose=np.zeros((1, 2, 7)),
+        gripper=np.zeros((1, 2)),
+        task="hdri test",
+        source_dataset="test",
+        source_episode="0",
+        joint_position=joints,
+    )
+    scene = export_blender_scene(episode, tmp_path / "scene", openarm_model_path)
+    environment = tmp_path / "probe.exr"
+    environment.write_bytes(b"test")
+    output = configure_blender_environment(
+        scene, scene.parent / "scene_hdri.json", environment, strength=0.8, area_light_scale=0.2
+    )
+    original = json.loads(scene.read_text())
+    configured = json.loads(output.read_text())
+    assert configured["objects"] == original["objects"]
+    assert configured["camera"] == original["camera"]
+    assert configured["lighting"]["environment_path"] == str(environment.resolve())
+    assert configured["lighting"]["world_strength"] == 0.8
+    assert configured["lighting"]["area_lights"][0]["energy_w"] == 32.0
 
 
 def test_frame_ranges_cover_every_frame_once() -> None:
