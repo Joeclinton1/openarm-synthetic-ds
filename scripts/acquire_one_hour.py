@@ -18,9 +18,7 @@ def main() -> None:
     args = parser.parse_args()
     configs = [
         Path("configs/sources/hiw500.yaml"),
-        Path("configs/sources/unifolm.yaml"),
         Path("configs/sources/molmoact2_tabletop.yaml"),
-        Path("configs/sources/agibot_derived_fallback.yaml"),
     ]
     report: dict[str, object] = {}
     for path in configs:

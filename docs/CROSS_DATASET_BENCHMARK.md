@@ -1,48 +1,79 @@
 # Cross-dataset OpenArm video benchmark
 
-The benchmark scripts construct the eight-clip visual evaluation under
-`outputs/cross_dataset_openarm_benchmark`. Generated videos, masks, renders, model weights, and
-downloaded source datasets remain Git-ignored. The scripts and manifests are the reproducible
-record committed to the repository.
+The benchmark builds six fixed six-second clips under
+`outputs/cross_dataset_openarm_benchmark`: two each from AgiBot World Alpha, HIW-500, and MolmoAct2
+Tabletop. Generated source video, masks, model weights, renders, and reports are Git-ignored.
 
-## Scope
+## Fixed selection
 
-The fixed selection contains two six-second demonstrations from each locally sampled dataset:
-AgiBot World Alpha, HIW-500, MolmoAct tabletop, and UnifoLM WBT. HIW and MolmoAct supply two task
-labels. The available AgiBot and UnifoLM subsets supply two demonstrations of one task; the
-manifest describes them as demonstrations rather than distinct upstream tasks.
+| Dataset | Clips | Projection |
+|---|---|---|
+| AgiBot World Alpha | Two water-pouring demonstrations | Recorded moving head camera mapped through the shared OpenArm registration |
+| HIW-500 | Hang hanger; hang keys on hook | Audited source-mask registration; not metric camera calibration |
+| MolmoAct2 Tabletop | Close box; flip mug upright | One fixed inspection camera fit from 240 correspondences |
 
-Source camera calibration is not sufficiently consistent across the four samples. The resulting
-render registration is therefore an explicit visual baseline and must not be used as metric
-image-space supervision.
+HIW uses one base/tool convention and a `0.8` workspace scale for both tasks. Molmo uses one shared
+Franka/OpenArm transform, explicit tool-axis correction, and one camera fit for both tasks. No clip
+is independently recentered in robot coordinates.
 
-## Pipeline
+## Reproduction
 
-1. `build_cross_dataset_benchmark.py` selects the highest-motion feasible six-second window and
-   writes the source video, sliced trajectory, and clip manifest.
-2. RobotSeg, SAM2, and optional manually seeded tracks populate the mask directories described by
-   `prepare_benchmark_masks.py`. Run that script to fuse the model results. An accepted AgiBot
-   full-episode mask sequence is optional and must be supplied explicitly:
+1. Build source clips and sliced trajectories:
 
    ```bash
-   uv run python scripts/prepare_benchmark_masks.py \
-     --accepted-agibot-fixture /path/to/accepted/full_episode_masks \
-     --accepted-agibot-start-frame 805
+   uv run python scripts/build_cross_dataset_benchmark.py
    ```
 
-   Without the option, the portable RobotSeg and appearance-prior path is used for both AgiBot
-   clips. No temporary-directory dependency is assumed.
-3. Fixed-camera clips use `openarm-retarget inpaint-static-camera`. Moving-camera clips use
-   `run_minimax_remover.py`; the script requires the upstream MiniMax-Remover implementation under
-   `vendor/MiniMax-Remover` and, by default, model weights in the local Hugging Face cache. Pass
-   `--allow-download` for the initial model fetch and `--gpu-id` to select a device.
-4. `prepare_benchmark_scenes.py` exports EEVEE render scenes. Render the generated scenes into
-   `render_raw`, and for bimanual clips also render the per-side scenes into `render_raw_left` and
-   `render_raw_right`.
-5. `align_benchmark_renders.py` performs the documented uncalibrated mask registration.
-6. Composite the aligned RGBA frames over `02_robot_removed.mp4`, retaining source pixels outside
-   target alpha, then run `evaluate_cross_dataset_benchmark.py`.
+2. Generate RobotSeg, optional SAM2 geometry tracks, and gripper masks using the CLI, then fuse the
+   audited mask inputs:
 
-The benchmark metrics cover removal background error, temporal background error, unchanged-scene
-error after compositing, runtime, inverse-kinematics feasibility, and pose error. They are diagnostic
-metrics for this benchmark, not VBench scores.
+   ```bash
+   uv run python scripts/prepare_benchmark_masks.py
+   ```
+
+   An accepted full-episode AgiBot fixture may be supplied explicitly with
+   `--accepted-agibot-fixture` and `--accepted-agibot-start-frame`. Without it, the portable
+   RobotSeg and appearance-prior path is used.
+
+3. Remove the source robot. Use `openarm-retarget inpaint-static-camera` for fixed-camera clips.
+   Use `scripts/run_minimax_remover.py` for moving-camera clips; it expects the upstream
+   implementation at `vendor/MiniMax-Remover`.
+
+4. Export Blender scenes:
+
+   ```bash
+   uv run python scripts/prepare_benchmark_scenes.py
+   ```
+
+   Render the main scene to `render_raw`. Bimanual uncalibrated clips also use the generated
+   per-side scenes in `render_raw_left` and `render_raw_right`.
+
+5. Register renders to the audited image evidence:
+
+   ```bash
+   uv run python scripts/align_benchmark_renders.py
+   ```
+
+   AgiBot retains its camera-registered projection. Molmo translates the projected pinch centre to
+   the audited gripper track at the fixed apparent scale without changing the fitted 3-D tool
+   direction. HIW uses the documented image-space registration and remains explicitly uncalibrated.
+
+6. Compose the output and regenerate the metrics:
+
+   ```bash
+   uv run python scripts/compose_benchmark_outputs.py
+   uv run python scripts/evaluate_cross_dataset_benchmark.py
+   ```
+
+Each clip contains `01_source.mp4`, `02_robot_removed.mp4`, `03_openarm_output.mp4`, and the
+labelled `source_removed_openarm.mp4` review triplet. AgiBot inserts only the moving OpenArm side and
+restores the stationary source arm from the accepted fixture mask.
+
+## Metrics and interpretation
+
+The evaluator records frame parity, background preservation, removal-region change, temporal
+background error, unchanged-scene composite error, alpha/mask overlap, tool-anchor image error,
+runtime, IK feasibility, Cartesian residual, and orientation residual.
+
+These are diagnostic benchmark metrics. They do not turn inspection-grade image registration into
+physical calibration, and they are not a substitute for human review of every final triplet.

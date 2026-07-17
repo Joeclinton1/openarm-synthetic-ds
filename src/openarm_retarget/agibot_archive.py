@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -22,6 +23,27 @@ from .retarget import apply_registration
 from .schema import Episode, SourceConfig
 
 AGIBOT_REPO = "agibot-world/AgiBotWorld-Alpha"
+AGIBOT_CONVERSION_VERSION = 2
+
+
+def _motion_active_sides(episode: Episode) -> list[str]:
+    """Select task-moving arms while retaining both arms for shared-frame registration."""
+    position_path = np.linalg.norm(np.diff(episode.ee_pose[..., :3], axis=0), axis=2).sum(axis=0)
+    quaternion = episode.ee_pose[..., 3:]
+    dots = np.abs(np.sum(quaternion[1:] * quaternion[:-1], axis=2))
+    rotation_path = np.sum(2.0 * np.arccos(np.clip(dots, 0.0, 1.0)), axis=0)
+    # Ten centimetres of equivalent lever arm makes orientation and translation comparable.
+    motion = position_path + 0.1 * rotation_path
+    maximum = float(np.max(motion))
+    if maximum < 1e-6:
+        return list(episode.metadata.get("active_sides", ("right", "left")))
+    sides = ("right", "left")
+    active = [
+        side
+        for index, side in enumerate(sides)
+        if float(motion[index]) >= max(0.01, 0.05 * maximum)
+    ]
+    return active or [sides[int(np.argmax(motion))]]
 
 
 def _episode_frames(annotation: dict) -> int:
@@ -238,6 +260,13 @@ def convert_agibot_hour(
     episode_dir.mkdir(parents=True, exist_ok=True)
     selected = manifest["episodes"][:max_episodes]
     solver = OpenArmIK(model_path)
+    conversion_signature = hashlib.sha256(
+        json.dumps(
+            {"config": config.to_json(), "pipeline_version": AGIBOT_CONVERSION_VERSION},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
     outputs = []
     quality: list[dict[str, Any]] = []
     for number, item in enumerate(selected, start=1):
@@ -245,7 +274,11 @@ def convert_agibot_hour(
         output = episode_dir / f"episode_{episode_index:06d}.npz"
         if output.exists() and resume:
             solved = Episode.load(output)
-            if solved.feasible is None or not np.any(solved.feasible):
+            if (
+                solved.feasible is None
+                or not np.any(solved.feasible)
+                or solved.metadata.get("conversion_signature") != conversion_signature
+            ):
                 output.unlink()
                 solved = None
         else:
@@ -266,14 +299,45 @@ def convert_agibot_hour(
             raw = load_agibot_h5(h5, raw_config, allow_uncalibrated=True)
             raw.task = item["task"]
             raw.source_episode = str(episode_index)
+            motion_active_sides = _motion_active_sides(raw)
             registration = auto_register_episode(
                 raw,
                 model_path,
                 source_tool_from_openarm_tool=config.source_tool_from_openarm_tool,
             )
             solved = apply_registration(raw, config, registration)
+            solved.metadata["active_sides"] = motion_active_sides
+            solved.metadata["active_side_selection"] = "source_pose_motion"
             solver.solve_episode(solved)
             filter_episode(solved, solver)
+            # A shared bimanual frame is preferable because it preserves the accepted AgiBot
+            # camera registration. Some demonstrations occupy a workspace where that frame makes
+            # the single moving arm less reachable, so evaluate an active-arm registration and
+            # select it only when it retains more frames. Ties keep the shared bimanual frame.
+            registered_sides = list(raw.metadata.get("active_sides", ("right", "left")))
+            if set(motion_active_sides) != set(registered_sides):
+                raw.metadata["active_sides"] = motion_active_sides
+                active_registration = auto_register_episode(
+                    raw,
+                    model_path,
+                    source_tool_from_openarm_tool=config.source_tool_from_openarm_tool,
+                )
+                active_solved = apply_registration(raw, config, active_registration)
+                active_solved.metadata["active_sides"] = motion_active_sides
+                active_solved.metadata["active_side_selection"] = "source_pose_motion"
+                solver.solve_episode(active_solved)
+                filter_episode(active_solved, solver)
+                raw.metadata["active_sides"] = registered_sides
+                if int(active_solved.feasible.sum()) > int(solved.feasible.sum()):
+                    solved = active_solved
+                    solved.metadata["registration_selection"] = (
+                        "active_arm_higher_feasibility"
+                    )
+                else:
+                    solved.metadata["registration_selection"] = (
+                        "shared_bimanual_frame_tie_or_higher_feasibility"
+                    )
+            solved.metadata["conversion_signature"] = conversion_signature
             solved.save(output)
         feasible = int(solved.feasible.sum()) if solved.feasible is not None else 0
         quality.append(

@@ -12,6 +12,8 @@ from pathlib import Path
 import numpy as np
 import pyarrow.parquet as pq
 
+from openarm_retarget.camera import write_agibot_openarm_camera, write_static_openarm_camera
+
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "outputs" / "cross_dataset_openarm_benchmark"
@@ -27,6 +29,7 @@ class Selection:
     source_root: Path
     camera: str | None = None
     crop: str | None = None
+    fixed_start_frame: int | None = None
 
 
 SELECTIONS = (
@@ -37,6 +40,7 @@ SELECTIONS = (
         30,
         ROOT / "data/converted/agibot_openarm/episodes/episode_649390.npz",
         ROOT / "data/samples/agibot-world__AgiBotWorld-Alpha/sample/observations/410/649390",
+        fixed_start_frame=666,
     ),
     Selection(
         "agibot_world_alpha",
@@ -45,6 +49,7 @@ SELECTIONS = (
         30,
         ROOT / "data/converted/agibot_openarm/episodes/episode_649684.npz",
         ROOT / "data/samples/agibot-world__AgiBotWorld-Alpha/sample/observations/410/649684",
+        fixed_start_frame=805,
     ),
     Selection(
         "hiw_500",
@@ -55,6 +60,7 @@ SELECTIONS = (
         ROOT / "data/samples/BitRobot__HIW-500-LeRobot",
         "observation.images.head",
         "crop=640:480:0:0",
+        fixed_start_frame=374,
     ),
     Selection(
         "hiw_500",
@@ -65,6 +71,7 @@ SELECTIONS = (
         ROOT / "data/samples/BitRobot__HIW-500-LeRobot",
         "observation.images.head",
         "crop=640:480:0:0",
+        fixed_start_frame=474,
     ),
     Selection(
         "molmoact2_tabletop",
@@ -74,6 +81,7 @@ SELECTIONS = (
         ROOT / "data/converted/molmo_openarm/episodes/episode_000000.npz",
         ROOT / "data/samples/allenai__MolmoAct2-MolmoAct-Dataset-Tabletop",
         "observation.images.primary",
+        fixed_start_frame=36,
     ),
     Selection(
         "molmoact2_tabletop",
@@ -83,24 +91,7 @@ SELECTIONS = (
         ROOT / "data/converted/molmo_openarm/episodes/episode_000460.npz",
         ROOT / "data/samples/allenai__MolmoAct2-MolmoAct-Dataset-Tabletop",
         "observation.images.primary",
-    ),
-    Selection(
-        "unifolm_wbt",
-        0,
-        "load_plates_demo_a",
-        30,
-        ROOT / "data/converted/unifolm_openarm/episodes/episode_000000.npz",
-        ROOT / "data/samples/unitreerobotics__G1_WBT_Brainco_Collect_Plates_Into_Dishwasher",
-        "observation.images.head_stereo_left",
-    ),
-    Selection(
-        "unifolm_wbt",
-        20,
-        "load_plates_demo_b",
-        30,
-        ROOT / "data/converted/unifolm_openarm/episodes/episode_000020.npz",
-        ROOT / "data/samples/unitreerobotics__G1_WBT_Brainco_Collect_Plates_Into_Dishwasher",
-        "observation.images.head_stereo_left",
+        fixed_start_frame=415,
     ),
 )
 
@@ -126,6 +117,20 @@ def _motion_window(joints: np.ndarray, feasible: np.ndarray, frames: int) -> tup
     return start, start + frames
 
 
+def _moving_joint_sides(joints: np.ndarray, declared: list[str]) -> list[str]:
+    sides = ("right", "left")
+    motion = np.linalg.norm(np.diff(joints, axis=0), axis=2).sum(axis=0)
+    maximum = float(np.max(motion))
+    if maximum < 1e-6:
+        return declared
+    moving = [
+        side
+        for index, side in enumerate(sides)
+        if side in declared and float(motion[index]) >= max(1e-3, 0.05 * maximum)
+    ]
+    return moving or declared
+
+
 def _slug(selection: Selection) -> str:
     task = re.sub(r"[^a-z0-9]+", "_", selection.task.lower()).strip("_")
     return f"{task}__episode_{selection.episode:06d}"
@@ -149,6 +154,34 @@ def _source_location(selection: Selection, rows: dict[int, dict] | None) -> tupl
     return source, round(timestamp * selection.fps)
 
 
+def _write_agibot_camera(
+    selection: Selection,
+    destination: Path,
+    first: int,
+    last: int,
+    output_video: Path,
+) -> None:
+    """Slice source camera poses to the exact benchmark window and map them to OpenArm."""
+    sample_root = selection.source_root.parents[2]
+    camera_root = (
+        sample_root / "parameters" / "410" / str(selection.episode) / "camera"
+    )
+    extrinsics = json.loads(
+        (camera_root / "head_extrinsic_params_aligned.json").read_text()
+    )
+    sliced_extrinsics = destination / "source_camera_extrinsics.json"
+    sliced_extrinsics.write_text(json.dumps(extrinsics[first:last], separators=(",", ":")) + "\n")
+    write_agibot_openarm_camera(
+        destination / "trajectory.npz",
+        camera_root / "head_intrinsic_params.json",
+        sliced_extrinsics,
+        destination / "camera.json",
+        video_path=output_video,
+        calibration_width=1280,
+        calibration_height=720,
+    )
+
+
 def main() -> None:
     OUTPUT.mkdir(parents=True, exist_ok=True)
     row_cache: dict[Path, dict[int, dict]] = {}
@@ -166,6 +199,9 @@ def main() -> None:
         first, last = _motion_window(
             arrays["joint_position"], arrays["feasible"], 6 * selection.fps
         )
+        if selection.fixed_start_frame is not None:
+            first = selection.fixed_start_frame
+            last = min(first + 6 * selection.fps, len(arrays["timestamp"]))
         destination = OUTPUT / selection.dataset / _slug(selection)
         destination.mkdir(parents=True, exist_ok=True)
         source, episode_offset = _source_location(selection, rows)
@@ -214,9 +250,20 @@ def main() -> None:
                 "benchmark_source_video": str(source.relative_to(ROOT)),
             }
         )
+        metadata["active_sides"] = _moving_joint_sides(
+            sliced["joint_position"], metadata.get("active_sides", ["right", "left"])
+        )
         sliced["timestamp"] = sliced["timestamp"] - sliced["timestamp"][0]
         sliced["metadata_json"] = np.array(json.dumps(metadata, sort_keys=True))
         np.savez_compressed(destination / "trajectory.npz", **sliced)
+        if selection.dataset == "agibot_world_alpha":
+            _write_agibot_camera(selection, destination, first, last, output_video)
+        elif selection.dataset == "molmoact2_tabletop":
+            write_static_openarm_camera(
+                destination / "trajectory.npz",
+                ROOT / "configs/cameras/molmoact2_tabletop_fitted.json",
+                destination / "camera.json",
+            )
         record = {
             "dataset": selection.dataset,
             "episode": selection.episode,

@@ -34,6 +34,8 @@ def auto_register_episode(
     minimum_scale: float = 0.4,
     maximum_scale: float = 1.0,
     source_tool_from_openarm_tool: PoseConfig = None,
+    openarm_from_source_base: PoseConfig = None,
+    position_scale: float | None = None,
 ) -> dict:
     """Estimate an inspection-grade source-to-OpenArm workspace registration.
 
@@ -53,6 +55,14 @@ def auto_register_episode(
             value = value[side]
         return np.asarray(value, dtype=np.float64)
 
+    def base_prior(side: str) -> np.ndarray | None:
+        if openarm_from_source_base is None:
+            return None
+        value = openarm_from_source_base
+        if isinstance(value, dict):
+            value = value[side]
+        return np.asarray(value, dtype=np.float64)
+
     source_poses = {side: episode.ee_pose[:, SIDES.index(side)] for side in active}
     workspace_poses = {}
     for side in active:
@@ -67,15 +77,23 @@ def auto_register_episode(
     workspace_mean = {side: _mean_pose(workspace_poses[side]) for side in active}
     target_mean = {side: solver.forward_pose(side, solver.neutral(side)) for side in active}
 
-    motion_radius = max(
-        float(
-            np.nanpercentile(
-                np.linalg.norm(workspace_poses[side][:, :3] - workspace_mean[side][:3], axis=1), 95
+    if position_scale is not None:
+        if not np.isfinite(position_scale) or position_scale <= 0:
+            raise ValueError("position_scale prior must be finite and positive")
+        scale = float(position_scale)
+    else:
+        motion_radius = max(
+            float(
+                np.nanpercentile(
+                    np.linalg.norm(
+                        workspace_poses[side][:, :3] - workspace_mean[side][:3], axis=1
+                    ),
+                    95,
+                )
             )
+            for side in active
         )
-        for side in active
-    )
-    scale = float(np.clip(0.20 / max(motion_radius, 1e-6), minimum_scale, maximum_scale))
+        scale = float(np.clip(0.20 / max(motion_radius, 1e-6), minimum_scale, maximum_scale))
     source_mean = {}
     for side in active:
         poses = source_poses[side].copy()
@@ -87,7 +105,12 @@ def auto_register_episode(
                 [matrix_to_pose(pose_to_matrix(pose) @ prior_matrix) for pose in poses]
             )
         source_mean[side] = _mean_pose(poses)
-    if len(active) == 2:
+    prior_base = base_prior(active[0])
+    if prior_base is not None:
+        if prior_base.shape != (7,):
+            raise ValueError("openarm_from_source_base prior must be a 7-vector")
+        base_rotation = Rotation.from_quat(prior_base[3:])
+    elif len(active) == 2:
         source_axis = source_mean["left"][:3] - source_mean["right"][:3]
         target_axis = target_mean["left"][:3] - target_mean["right"][:3]
         if np.linalg.norm(source_axis) < 1e-5:
@@ -96,10 +119,16 @@ def auto_register_episode(
     else:
         base_rotation = Rotation.identity()
 
-    source_center = np.mean([source_mean[side][:3] for side in active], axis=0)
-    target_center = np.mean([target_mean[side][:3] for side in active], axis=0)
-    translation = target_center - base_rotation.apply(source_center)
-    shared_base_pose = np.concatenate([translation, base_rotation.as_quat()])
+    if prior_base is not None:
+        # A configured base transform is a complete dataset-level calibration. Re-centering its
+        # translation per episode makes the same physical robot appear to move its base between
+        # tasks and breaks any source-camera mapping.
+        shared_base_pose = prior_base.copy()
+    else:
+        source_center = np.mean([source_mean[side][:3] for side in active], axis=0)
+        target_center = np.mean([target_mean[side][:3] for side in active], axis=0)
+        translation = target_center - base_rotation.apply(source_center)
+        shared_base_pose = np.concatenate([translation, base_rotation.as_quat()])
     base_poses: dict[str, list[float]] = {side: shared_base_pose.tolist() for side in active}
     tool_poses: dict[str, list[float]] = {}
     for side in active:

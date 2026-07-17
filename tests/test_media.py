@@ -13,7 +13,6 @@ from openarm_retarget.ai_masks import (
     select_robot_boxes,
 )
 from openarm_retarget.media import (
-    apply_mask_constrained_style,
     calibrate_rgba_photometry,
     composite_rgba,
     distort_rgba_frames,
@@ -23,7 +22,6 @@ from openarm_retarget.media import (
     inpaint_static_camera,
     inpaint_video,
     refine_robot_masks,
-    record_style_validation,
     refine_protected_masks,
     restore_protected_video,
     stabilize_masks,
@@ -33,7 +31,6 @@ from openarm_retarget.media import (
     validate_depth_render,
     validate_composite_video,
     validate_robot_masks,
-    validate_style_refinement,
     validate_rgba_render,
     validate_render_alignment,
     validate_embodiment_alignment,
@@ -574,83 +571,6 @@ def test_source_calibrated_photometry_improves_match_and_preserves_alpha(tmp_pat
     original = cv2.imread(str(rgba / "000000.png"), cv2.IMREAD_UNCHANGED)
     calibrated = cv2.imread(str(output / "000000.png"), cv2.IMREAD_UNCHANGED)
     np.testing.assert_array_equal(original[..., 3], calibrated[..., 3])
-
-
-def test_style_refinement_gate_accepts_identical_video(tmp_path) -> None:
-    video = tmp_path / "reference.mp4"
-    masks = tmp_path / "masks"
-    masks.mkdir()
-    writer = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"mp4v"), 10, (32, 24))
-    for index in range(2):
-        frame = np.full((24, 32, 3), 60 + index, dtype=np.uint8)
-        writer.write(frame)
-        mask = np.zeros((24, 32), dtype=np.uint8)
-        mask[8:16, 12:20] = 255
-        cv2.imwrite(str(masks / f"{index:06d}.png"), mask)
-    writer.release()
-    report = validate_style_refinement(video, video, masks, masks)
-    assert report["ok"]
-    assert report["mean_robot_mask_iou"] == 1
-    assert report["background_mae"] == 0
-
-
-def test_mask_constrained_style_cannot_change_background_or_protected_pixels(tmp_path) -> None:
-    reference = tmp_path / "reference.mp4"
-    candidate = tmp_path / "candidate.mp4"
-    rgba = tmp_path / "rgba"
-    protected = tmp_path / "protected"
-    rgba.mkdir()
-    protected.mkdir()
-    reference_writer = cv2.VideoWriter(
-        str(reference), cv2.VideoWriter_fourcc(*"mp4v"), 10, (32, 24)
-    )
-    candidate_writer = cv2.VideoWriter(
-        str(candidate), cv2.VideoWriter_fourcc(*"mp4v"), 10, (32, 24)
-    )
-    for index in range(2):
-        reference_writer.write(np.full((24, 32, 3), 40, dtype=np.uint8))
-        candidate_writer.write(np.full((24, 32, 3), 180, dtype=np.uint8))
-        layer = np.zeros((24, 32, 4), dtype=np.uint8)
-        layer[6:18, 8:24, 3] = 255
-        cv2.imwrite(str(rgba / f"{index:06d}.png"), layer)
-        keep = np.zeros((24, 32), dtype=np.uint8)
-        keep[10:14, 14:18] = 255
-        cv2.imwrite(str(protected / f"{index:06d}.png"), keep)
-    reference_writer.release()
-    candidate_writer.release()
-    output = tmp_path / "safe.mp4"
-    report = apply_mask_constrained_style(
-        reference,
-        candidate,
-        rgba,
-        output,
-        protected_mask_dir=protected,
-        strength=1,
-        maximum_channel_delta=50,
-    )
-    assert report["geometry_modified"] is False
-    assert report["mean_robot_color_change_255"] > 40
-    reference_capture = cv2.VideoCapture(str(reference))
-    reference_ok, reference_frame = reference_capture.read()
-    reference_capture.release()
-    assert reference_ok
-    capture = cv2.VideoCapture(str(output))
-    ok, result = capture.read()
-    capture.release()
-    assert ok
-    outside = np.ones((24, 32), dtype=bool)
-    outside[6:18, 8:24] = False
-    assert np.mean(np.abs(result.astype(float) - reference_frame)[outside]) < 3
-    assert np.mean(np.abs(result.astype(float) - reference_frame)[10:14, 14:18]) < 4
-    assert np.mean(np.abs(result.astype(float) - reference_frame)[7:10, 9:14]) > 35
-    manifest = record_style_validation(
-        output.with_suffix(output.suffix + ".manifest.json"),
-        output,
-        {"ok": True, "mean_robot_mask_iou": 1.0},
-        tmp_path / "validation.json",
-    )
-    assert manifest["release_accepted"] is True
-    assert json.loads((tmp_path / "validation.json").read_text())["ok"] is True
 
 
 def test_ffmpeg_chunk_decoder_reads_every_frame(tmp_path) -> None:

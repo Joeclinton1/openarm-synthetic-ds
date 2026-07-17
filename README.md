@@ -1,34 +1,51 @@
 # OpenArm 2.0 dataset retargeting
 
-Tools for sampling heterogeneous robot datasets, converting end-effector poses into the
-official OpenArm 2.0 frame, solving temporally smooth 7-DoF IK, filtering infeasible motion,
-and exporting LeRobot v3 datasets. Image-space embodiment replacement is included as a
-separate, auditable stage.
+Retarget Cartesian demonstrations from AgiBot World Alpha, HIW-500, and MolmoAct2 Tabletop to
+the official OpenArm 2.0 bimanual model. The repository contains the conversion, temporally
+smooth 7-DoF IK, feasibility checks, deterministic Blender rendering, robot removal, compositing,
+and validation code used for the six-clip cross-dataset benchmark.
 
-The target pose is always the origin of `openarm_{right,left}_ee_base_link` relative to the
-root of the official OpenArm 2.0 bimanual MuJoCo model. Positions are metres and quaternions
-are `xyzw`. Exported joint vectors match the official OpenArm dataset ordering:
-right joints 1-7, right gripper, left joints 1-7, left gripper.
-Canonical gripper values are `0=open, 1=closed`; the physical fingertip aperture and moving
-pinch midpoint are validated from the pinned official MJCF for every accepted frame.
+Generated datasets, source media, model weights, and videos are intentionally excluded from Git.
 
-Automatic conversions use one shared source-to-OpenArm base transform for both arms. They are
-fully reproducible and suitable for inspection/training experiments, but remain explicitly
-`calibration_validated: false` until physical base and flange correspondences are measured.
-The exporter never silently promotes automatic workspace registration to metrological truth.
+## Coordinate contract
+
+Canonical end-effector poses are `[x, y, z, qx, qy, qz, qw]` in metres, expressed from the
+OpenArm model root to `openarm_{right,left}_ee_base_link`. Joint exports follow:
+
+```text
+right joints 1-7, right gripper, left joints 1-7, left gripper
+```
+
+Gripper state is `0=open, 1=closed`. Both arms share one source-to-OpenArm base transform;
+per-arm tool transforms handle different flange conventions. Automatic registrations remain
+marked `calibration_validated: false` until physical base, tool, and camera correspondences are
+measured.
 
 ## Quick start
 
+Python 3.11+, `uv`, FFmpeg, MuJoCo, and Blender are required. GPU extras are only needed for
+learned segmentation or moving-camera removal.
+
 ```bash
-uv sync --extra dev --extra media-ai --extra video-inpaint --extra robotseg
+uv sync --extra dev
 uv run openarm-retarget fetch-model
 uv run openarm-retarget inspect-source configs/sources/molmoact2_tabletop.yaml
 uv run pytest
 ```
 
-The complete coordinate contract, dataset status, workflow, validation results, rendering
-benchmarks, and embodiment-transfer decisions are condensed into
-[docs/PROJECT.md](docs/PROJECT.md). Raw data and generated media are intentionally Git-ignored.
-The optional UE 5.7/URLab candidate backend lives in `unreal/OpenArmRenderer`; Blender remains
-the accepted default until Unreal passes the complete geometry, depth, synchronization, temporal,
-throughput, protected-object, and human-review gates documented there.
+Optional components:
+
+```bash
+uv sync --extra media-ai --extra robotseg  # SAM2/RobotSeg masks
+uv sync --extra minimax                    # MiniMax moving-camera removal
+```
+
+Run `uv run openarm-retarget --help` for the conversion and rendering commands. See
+[docs/PROJECT.md](docs/PROJECT.md) for the data and calibration workflow, and
+[docs/CROSS_DATASET_BENCHMARK.md](docs/CROSS_DATASET_BENCHMARK.md) for the reproducible visual
+evaluation.
+
+## License
+
+The code is Apache-2.0. Source datasets and upstream models retain their own licenses and access
+terms; review them before redistributing generated data.

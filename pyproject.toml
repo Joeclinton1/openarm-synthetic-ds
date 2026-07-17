@@ -12,7 +12,6 @@ license = {text = "Apache-2.0"}
 dependencies = [
   "h5py>=3.12",
   "huggingface-hub>=0.30",
-  "mcap>=1.2",
   "mujoco>=3.3",
   "numpy>=2.0",
   "opencv-python-headless>=4.10",
@@ -24,39 +23,19 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "ruff>=0.11"]
-official-ik = [
-  "openarm-control @ git+https://github.com/enactic/openarm_control.git@09c30d01f9bdc4945bcaa7e80e8d21795d74a79e",
-]
-urlab = [
-  "urlab-bridge @ git+https://github.com/URLab-Sim/urlab_bridge.git@bd3a63b15c6430b0b3738a0f5876554d5408644a",
-]
-ros = ["mcap-ros2-support>=0.5"]
 media-ai = [
   "pillow>=11",
   "torch==2.9.1",
   "torchvision==0.24.1",
   "transformers>=4.56",
 ]
-style-ai = [
+minimax = [
   "accelerate>=1.8",
-  "diffusers>=0.36,<0.39",
-  "ftfy>=6.3",
-  "pillow>=11",
-  "sentencepiece>=0.2",
-  "torch==2.9.1",
-  "transformers>=4.56",
-]
-video-inpaint = [
-  "addict>=2.4",
-  "av>=14",
+  "diffusers>=0.33,<0.39",
   "einops>=0.8",
-  "future>=1.0",
-  "imageio-ffmpeg>=0.6",
-  "matplotlib>=3.10",
-  "requests>=2.32",
-  "scikit-image>=0.25",
-  "timm>=1.0",
-  "yapf>=0.43",
+  "omegaconf>=2.3",
+  "pillow>=11",
+  "torch==2.9.1",
 ]
 robotseg = [
   "hydra-core>=1.3",

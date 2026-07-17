@@ -50,6 +50,9 @@ def test_blender_scene_contains_official_meshes_and_motion(tmp_path, openarm_mod
     )
     assert left_finger["world_from_object_frames"][0] != left_finger["world_from_object_frames"][1]
     assert payload["gripper"]["semantics"] == "normalized 0=open, 1=closed"
+    right_pinch = payload["anchors"]["right"]["pinch_center_world_frames"]
+    assert len(right_pinch) == 2
+    assert right_pinch[0] != right_pinch[1]
     viewer = TrajectoryViewer(openarm_model_path)
     geom_id = mujoco.mj_name2id(viewer.model, mujoco.mjtObj.mjOBJ_GEOM, "finger_inner_left_00")
     for frame in range(2):

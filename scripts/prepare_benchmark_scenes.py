@@ -23,6 +23,7 @@ def main() -> None:
         scene_path = export_blender_scene(
             episode,
             clip / "render_scene",
+            camera_json=(clip / "camera.json") if (clip / "camera.json").exists() else None,
             width=640,
             height=480,
             samples=0,
@@ -36,10 +37,28 @@ def main() -> None:
             for item in scene["objects"]
             if not any(f"_{side}_" in item["name"] for side in {"right", "left"} - active)
         ]
+        camera_registered = (
+            clip.parent.name == "agibot_world_alpha" and (clip / "camera.json").exists()
+        )
+        camera_fitted = (
+            clip.parent.name == "molmoact2_tabletop" and (clip / "camera.json").exists()
+        )
         scene["benchmark_projection"] = {
-            "mode": "uncalibrated preview followed by source-mask affine registration",
+            "mode": (
+                "accepted AgiBot fixture camera registration"
+                if camera_registered
+                else "audited Molmo fixed-camera fit"
+                if camera_fitted
+                else "uncalibrated preview followed by source-mask affine registration"
+            ),
             "active_sides": sorted(active),
-            "warning": "Image projection is not a measured source-camera calibration.",
+            "warning": (
+                "Source camera mapping reproduced on the complete AgiBot episode 649684 fixture."
+                if camera_registered
+                else "Fixed camera estimated from 240 audited source end-effector correspondences."
+                if camera_fitted
+                else "Image projection is not a measured source-camera calibration."
+            ),
         }
         scene_path.write_text(json.dumps(scene, separators=(",", ":")) + "\n")
         if active == {"right", "left"}:

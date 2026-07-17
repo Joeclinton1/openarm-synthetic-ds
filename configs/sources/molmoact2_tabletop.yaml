@@ -2,11 +2,18 @@ name: MolmoAct2 Tabletop
 repo_id: allenai/MolmoAct2-MolmoAct-Dataset-Tabletop
 adapter: lerobot
 fps: 20
-rotation_representation: rotvec
-position_scale: 1.0
+rotation_representation: euler
+rotation_euler_order: xyz
+position_scale: 0.55
 single_arm_side: right
 arm_order: [right]
 calibrated: false
+# Shared inspection-grade frame convention. The complete base transform and metric scale are fit
+# once across both audited tasks; they must not be re-centered independently per episode. Franka's
+# reported +Z tool axis follows the fingers while OpenArm's fingers extend along -Z, so keep that
+# physical tool flip separate from the source-base rotation.
+openarm_from_source_base: [0.1854289142, 0.1371226616, -0.1103864280, 0.6389912505, -0.2771101724, -0.2357273024, 0.6777409336]
+source_tool_from_openarm_tool: [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
 gripper_mode: normalized
 fields:
   pose: observation.state

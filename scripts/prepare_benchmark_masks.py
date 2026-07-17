@@ -104,7 +104,6 @@ def main() -> None:
             if not ok:
                 raise RuntimeError(f"Could not decode frame {index} from {clip}")
             robotseg = read(robot_path)
-            sam2 = read(clip / "masks_sam2" / f"{index:06d}.png")
             gripper = read(clip / "masks_gripper" / f"{index:06d}.png")
             if dataset == "agibot_world_alpha":
                 if "demo_b" in clip.name and accepted_fixture is not None:
@@ -127,13 +126,6 @@ def main() -> None:
                     combined = edge_components(robotseg) | horizontal_edge_components(dark)
                     gripper_addition = nearby_gripper(combined, gripper)
                     source_description = "edge-filtered RobotSeg plus dark-arm appearance prior"
-            elif dataset == "unifolm_wbt":
-                combined = robotseg | sam2
-                if "demo_a" in clip.name:
-                    combined |= read(clip / "masks_manual_left" / f"{index:06d}.png")
-                    combined |= read(clip / "masks_manual_right" / f"{index:06d}.png")
-                    source_description = "RobotSeg/SAM2 plus two explicit arm tracks"
-                gripper_addition = nearby_gripper(combined, gripper)
             elif dataset == "hiw_500" and "hang_hanger" in clip.name:
                 combined = robotseg
                 combined |= read(clip / "masks_manual_left" / f"{index:06d}.png")

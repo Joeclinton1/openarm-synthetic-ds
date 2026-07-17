@@ -27,18 +27,6 @@ __pycache__/
 # Third-party source trees and downloaded applications are installed locally
 /vendor/
 
-# Unreal: commit only the minimal project source/configuration. The URLab
-# checkout, imported uassets, compiled modules, DDC, and cooked runtime are local.
-/unreal/OpenArmRenderer/Plugins/
-/unreal/OpenArmRenderer/Content/
-/unreal/OpenArmRenderer/Binaries/
-/unreal/OpenArmRenderer/Build/
-/unreal/OpenArmRenderer/DerivedDataCache/
-/unreal/OpenArmRenderer/Intermediate/
-/unreal/OpenArmRenderer/Saved/
-/unreal/OpenArmRenderer/.vs/
-/unreal/runtime/
-
 # Large model and media artifacts accidentally created outside the directories above
 *.ckpt
 *.engine

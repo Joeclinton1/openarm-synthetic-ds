@@ -112,6 +112,8 @@ def evaluate_clip(clip: Path) -> dict[str, float | int | str | bool]:
     method, removal_seconds = removal_runtime(clip)
     rendering_seconds = render_runtime(clip)
     clip_metadata = json.loads((clip / "clip.json").read_text())
+    alignment = json.loads((clip / "render_aligned/alignment_manifest.json").read_text())
+    side_metrics = list(alignment["side_metrics"].values())
     metrics: dict[str, float | int | str | bool] = {
         "dataset": clip.parent.name,
         "clip": clip.name,
@@ -130,6 +132,15 @@ def evaluate_clip(clip: Path) -> dict[str, float | int | str | bool]:
         / max(output_background_values, 1)
         / 255.0,
         "target_alpha_fraction": float(np.mean(target_fraction)),
+        "render_alpha_inside_source_mask": float(
+            alignment["render_alpha_inside_source_mask"]
+        ),
+        "source_mask_covered_by_render": float(
+            alignment["source_mask_covered_by_render"]
+        ),
+        "mean_tool_anchor_rmse_px": float(
+            np.mean([float(value["tool_anchor_rmse_px"]) for value in side_metrics])
+        ),
         "removal_seconds": removal_seconds,
         "render_seconds": rendering_seconds,
         "production_fps": len(source) / max(removal_seconds + rendering_seconds, 1e-12),
@@ -148,6 +159,9 @@ def main() -> None:
         "temporal_background_error",
         "output_background_mae",
         "target_alpha_fraction",
+        "render_alpha_inside_source_mask",
+        "source_mask_covered_by_render",
+        "mean_tool_anchor_rmse_px",
         "removal_seconds",
         "render_seconds",
         "production_fps",

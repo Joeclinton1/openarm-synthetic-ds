@@ -1,6 +1,28 @@
 import json
 
-from openarm_retarget.agibot_archive import _archive_range, _episode_frames
+import numpy as np
+
+from openarm_retarget.agibot_archive import (
+    _archive_range,
+    _episode_frames,
+    _motion_active_sides,
+)
+from openarm_retarget.schema import Episode
+
+
+def test_motion_active_sides_excludes_stationary_arm() -> None:
+    pose = np.zeros((20, 2, 7))
+    pose[..., 6] = 1
+    pose[:, 1, 0] = np.linspace(0, 0.2, len(pose))
+    episode = Episode(
+        timestamp=np.arange(20) / 30,
+        ee_pose=pose,
+        gripper=np.zeros((20, 2)),
+        task="test",
+        source_dataset="agibot",
+        source_episode="0",
+    )
+    assert _motion_active_sides(episode) == ["left"]
 
 
 def test_archive_range() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -17,6 +18,18 @@ from .presets import load_hiw_episode
 from .registration import auto_register_episode
 from .retarget import apply_registration
 from .schema import Episode, SourceConfig
+
+
+BATCH_CONVERSION_VERSION = 4
+
+
+def _conversion_signature(config: SourceConfig) -> str:
+    payload = {
+        "pipeline_version": BATCH_CONVERSION_VERSION,
+        "source_config": config.to_json(),
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode()).hexdigest()
 
 
 def _load_episode(table: pa.Table, config: SourceConfig, episode_index: int) -> Episode:
@@ -47,6 +60,7 @@ def convert_lerobot_hour(
     table = pq.read_table(sample_parquet)
     table = table.filter(np.isin(np.asarray(table["episode_index"]), list(selected_ids)))
     solver = OpenArmIK(model_path)
+    conversion_signature = _conversion_signature(config)
     outputs: list[Path] = []
     quality: list[dict] = []
     for number, selected_episode in enumerate(selected, start=1):
@@ -54,7 +68,11 @@ def convert_lerobot_hour(
         output = episode_dir / f"episode_{episode_index:06d}.npz"
         if output.exists() and resume:
             solved = Episode.load(output)
-            if solved.feasible is None or not np.any(solved.feasible):
+            if (
+                solved.feasible is None
+                or not np.any(solved.feasible)
+                or solved.metadata.get("conversion_signature") != conversion_signature
+            ):
                 output.unlink()
                 solved = None
         else:
@@ -67,6 +85,7 @@ def convert_lerobot_hour(
                 config,
                 openarm_from_source_base=None,
                 source_tool_from_openarm_tool=None,
+                position_scale=1.0,
                 preserve_pinch_center=False,
             )
             raw = _load_episode(table, raw_config, episode_index)
@@ -74,10 +93,17 @@ def convert_lerobot_hour(
                 raw,
                 model_path,
                 source_tool_from_openarm_tool=config.source_tool_from_openarm_tool,
+                openarm_from_source_base=config.openarm_from_source_base,
+                position_scale=(
+                    config.position_scale
+                    if config.openarm_from_source_base is not None
+                    else None
+                ),
             )
             solved = apply_registration(raw, config, registration)
             solver.solve_episode(solved)
             filter_episode(solved, solver)
+            solved.metadata["conversion_signature"] = conversion_signature
             solved.save(output)
         feasible = int(solved.feasible.sum()) if solved.feasible is not None else 0
         quality.append(

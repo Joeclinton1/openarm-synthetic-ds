@@ -10,6 +10,48 @@ from .poses import pose_to_matrix
 from .schema import Episode
 
 
+def write_static_openarm_camera(
+    episode_path: str | Path,
+    source_camera_path: str | Path,
+    output: str | Path,
+) -> Path:
+    """Map a static source-frame camera through one complete dataset registration."""
+    episode = Episode.load(episode_path)
+    registration = episode.metadata.get("registration")
+    if not registration or not registration.get("shared_base_frame"):
+        raise ValueError("Episode requires a shared-frame registration")
+    active = episode.metadata.get("active_sides", ["right", "left"])
+    bases = registration["openarm_from_source_base"]
+    selected = [np.asarray(bases[side], dtype=np.float64) for side in active]
+    if not selected or any(not np.allclose(selected[0], value) for value in selected[1:]):
+        raise ValueError("Active arms do not use one shared OpenArm base transform")
+    openarm_from_source = pose_to_matrix(selected[0])
+    scale = float(registration["position_scale"])
+    source = json.loads(Path(source_camera_path).read_text())
+    source_world_from_camera = np.asarray(source["world_from_camera"], dtype=np.float64)
+    if source_world_from_camera.shape != (4, 4):
+        raise ValueError("Static source camera world_from_camera must be a 4x4 matrix")
+    openarm_world_from_camera = np.eye(4)
+    openarm_world_from_camera[:3, :3] = (
+        openarm_from_source[:3, :3] @ source_world_from_camera[:3, :3]
+    )
+    openarm_world_from_camera[:3, 3] = (
+        openarm_from_source[:3, 3]
+        + scale * openarm_from_source[:3, :3] @ source_world_from_camera[:3, 3]
+    )
+    payload = {
+        **source,
+        "world_from_camera": openarm_world_from_camera.tolist(),
+        "world_from_camera_frames": [openarm_world_from_camera.tolist()],
+        "source_camera": str(Path(source_camera_path).resolve()),
+        "registration_validated": bool(registration.get("validated", False)),
+    }
+    path = Path(output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+    return path
+
+
 def write_agibot_openarm_camera(
     episode_path: str | Path,
     intrinsic_path: str | Path,

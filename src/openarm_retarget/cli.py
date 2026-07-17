@@ -23,38 +23,29 @@ from .export import export_lerobot_v3, validate_lerobot_v3
 from .filters import filter_episode
 from .ik import OpenArmIK
 from .gripper_validation import validate_gripper_contact
-from .ik_compare import compare_ik_episode, package_ik_review_videos
 from .media import (
-    apply_mask_constrained_style,
-    apply_mask_constrained_style_batch,
     calibrate_rgba_photometry,
     composite_video,
     distort_rgba_frames,
     distort_depth_frames,
     harmonize_rgba_frames,
     fuse_robot_gripper_masks,
-    inpaint_propainter,
     inpaint_static_camera,
     inpaint_video,
     refine_protected_masks,
     refine_robot_masks,
     restore_protected_video,
-    record_style_validation,
     validate_inpainting,
     validate_harmonized_rgba,
     validate_photometric_calibration,
     validate_depth_render,
     validate_composite_video,
     validate_robot_masks,
-    validate_style_refinement,
     validate_rgba_render,
     validate_render_alignment,
     validate_embodiment_alignment,
-    write_cosmos_transfer_manifest,
-    write_render_manifest,
 )
 from .model import fetch_openarm_model
-from .official_ik import OfficialIKConfig
 from .presets import fit_workspace_translation, load_hiw_episode
 from .raytrace import (
     configure_blender_environment,
@@ -65,16 +56,6 @@ from .raytrace import (
 from .robotseg import segment_robotseg_video
 from .registration import auto_register_episode
 from .schema import Episode, SourceConfig
-from .urlab import (
-    export_urlab_job,
-    import_urlab_asset,
-    prepare_urlab_asset,
-    render_urlab_batch,
-    render_urlab_job,
-    urlab_doctor,
-    validate_urlab_against_references,
-    validate_urlab_job,
-)
 from .viewer import TrajectoryViewer
 
 app = typer.Typer(no_args_is_help=True, help="Retarget robot datasets to OpenArm 2.0")
@@ -298,6 +279,14 @@ def auto_register(
         source_tool_from_openarm_tool=(
             config.source_tool_from_openarm_tool if config is not None else None
         ),
+        openarm_from_source_base=(
+            config.openarm_from_source_base if config is not None else None
+        ),
+        position_scale=(
+            config.position_scale
+            if config is not None and config.openarm_from_source_base is not None
+            else None
+        ),
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(values, indent=2) + "\n")
@@ -316,60 +305,6 @@ def solve(source: Path, output: Path, model: Path | None = None, apply_filter: b
         int(episode.feasible.sum()) if episode.feasible is not None else len(episode.timestamp)
     )
     typer.echo(f"{output}: {feasible}/{len(episode.timestamp)} feasible frames")
-
-
-@app.command("compare-ik")
-def compare_ik(
-    source: Path,
-    destination: Path,
-    model: Path | None = None,
-    max_iterations: int = 80,
-    render: bool = True,
-    width: int = 640,
-    height: int = 480,
-    contact_start: int = 560,
-    contact_end: int = 770,
-) -> None:
-    """Compare current DLS IK with pinned official Dora/OpenArm Mink IK."""
-    report = compare_ik_episode(
-        source,
-        destination,
-        model,
-        official_config=OfficialIKConfig(max_iterations=max_iterations),
-        render=render,
-        width=width,
-        height=height,
-        contact_start=contact_start,
-        contact_end=contact_end,
-    )
-    typer.echo(json.dumps(report, indent=2))
-
-
-@app.command("package-ik-review")
-def package_ik_review(
-    current_video: Path,
-    official_video: Path,
-    destination: Path,
-    source_video: Path | None = None,
-    removed_video: Path | None = None,
-    contact_start: int = 560,
-    contact_end: int = 770,
-) -> None:
-    """Build synchronized two- or four-column IK human-review videos."""
-    typer.echo(
-        json.dumps(
-            package_ik_review_videos(
-                current_video,
-                official_video,
-                destination,
-                source_video=source_video,
-                removed_video=removed_video,
-                contact_start=contact_start,
-                contact_end=contact_end,
-            ),
-            indent=2,
-        )
-    )
 
 
 @app.command("view")
@@ -410,12 +345,10 @@ def render(
     width: int = 960,
     height: int = 720,
     backend: str = typer.Option(
-        "mujoco", help="mujoco, blender-eevee, blender-cycles, or unreal-lumen"
+        "mujoco", help="mujoco, blender-eevee, or blender-cycles"
     ),
     blender: Path = Path("blender"),
     device: str = "CPU",
-    address: str = "tcp://localhost",
-    transport: str = "shm",
 ) -> None:
     episode = Episode.load(source)
     backend = backend.lower()
@@ -454,15 +387,7 @@ def render(
             )
         )
         return
-    if backend == "unreal-lumen":
-        job = export_urlab_job(
-            episode, output / "job", camera_json, model, width=width, height=height
-        )
-        typer.echo(render_urlab_job(job, output / "frames", address=address, transport=transport))
-        return
-    raise typer.BadParameter(
-        "backend must be mujoco, blender-eevee, blender-cycles, or unreal-lumen"
-    )
+    raise typer.BadParameter("backend must be mujoco, blender-eevee, or blender-cycles")
 
 
 @app.command("blender-scene")
@@ -552,145 +477,6 @@ def render_blender_batch_command(
             write_depth=write_depth,
         )
     )
-
-
-@app.command("urlab-doctor")
-def urlab_doctor_command(
-    plugin: Path | None = None,
-    project: Path = Path("unreal/OpenArmRenderer/OpenArmRenderer.uproject"),
-) -> None:
-    report = urlab_doctor(plugin, project)
-    typer.echo(json.dumps(report, indent=2))
-    if not report["ok"]:
-        raise typer.Exit(code=1)
-
-
-@app.command("urlab-job")
-def urlab_job(
-    source: Path,
-    destination: Path,
-    camera_json: Path,
-    model: Path | None = None,
-    width: int = 960,
-    height: int = 720,
-    max_frames: int | None = None,
-) -> None:
-    typer.echo(
-        export_urlab_job(
-            Episode.load(source),
-            destination,
-            camera_json,
-            model,
-            width=width,
-            height=height,
-            max_frames=max_frames,
-        )
-    )
-
-
-@app.command("validate-urlab-job")
-def validate_urlab_job_command(job: Path) -> None:
-    typer.echo(json.dumps(validate_urlab_job(job), indent=2))
-
-
-@app.command("prepare-urlab-asset")
-def prepare_urlab_asset_command(
-    destination: Path = Path("data/assets/openarm_urlab"),
-    model: Path | None = None,
-) -> None:
-    typer.echo(prepare_urlab_asset(destination, model))
-
-
-@app.command("import-urlab-asset")
-def import_urlab_asset_command(
-    destination: Path = Path("data/assets/openarm_urlab"),
-    model: Path | None = None,
-    address: str = "tcp://localhost",
-) -> None:
-    typer.echo(json.dumps(import_urlab_asset(destination, model, address=address), indent=2))
-
-
-@app.command("render-urlab")
-def render_urlab(
-    job: Path,
-    output: Path,
-    address: str = "tcp://localhost",
-    transport: str = "shm",
-    step_port: int = 5559,
-    output_mode: str = "audit",
-) -> None:
-    typer.echo(
-        render_urlab_job(
-            job,
-            output,
-            address=address,
-            transport=transport,
-            step_port=step_port,
-            output_mode=output_mode,
-        )
-    )
-
-
-@app.command("render-urlab-batch")
-def render_urlab_batch_command(
-    job: Path,
-    output: Path,
-    gpu_ids: str = "0",
-    shard_frames: int = 256,
-    warmup_frames: int = 8,
-    resume: bool = True,
-    transport: str = "shm",
-    address: str = "tcp://localhost",
-    base_step_port: int = 5559,
-    runtime: Path | None = typer.Option(None, help="Cooked runtime; launches one process per GPU"),
-    startup_timeout_s: float = 120.0,
-    output_mode: str = "production",
-    writer_queue_size: int = 8,
-) -> None:
-    parsed_gpu_ids = tuple(int(value) for value in gpu_ids.split(",") if value.strip())
-    typer.echo(
-        render_urlab_batch(
-            job,
-            output,
-            gpu_ids=parsed_gpu_ids,
-            shard_frames=shard_frames,
-            warmup_frames=warmup_frames,
-            resume=resume,
-            transport=transport,
-            address=address,
-            base_step_port=base_step_port,
-            runtime=runtime,
-            startup_timeout_s=startup_timeout_s,
-            output_mode=output_mode,
-            writer_queue_size=writer_queue_size,
-        )
-    )
-
-
-@app.command("validate-urlab")
-def validate_urlab_command(
-    urlab_rgba: Path,
-    blender_rgba: Path,
-    mujoco_rgba: Path | None = None,
-    minimum_mean_iou: float = 0.95,
-    minimum_p05_iou: float = 0.90,
-    maximum_mean_boundary_error_px: float = 1.0,
-    output: Path | None = None,
-) -> None:
-    report = validate_urlab_against_references(
-        urlab_rgba,
-        blender_rgba,
-        mujoco_rgba,
-        minimum_mean_iou=minimum_mean_iou,
-        minimum_p05_iou=minimum_p05_iou,
-        maximum_mean_boundary_error_px=maximum_mean_boundary_error_px,
-    )
-    if output:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(report, indent=2) + "\n")
-    typer.echo(json.dumps(report, indent=2))
-    if not report["ok"]:
-        raise typer.Exit(code=1)
 
 
 @app.command("agibot-camera")
@@ -906,37 +692,6 @@ def restore_protected(
             exclude_margin=exclude_margin,
             feather_radius=feather_radius,
             minimum_mask_area_ratio=minimum_mask_area_ratio,
-        )
-    )
-
-
-@app.command("inpaint-propainter")
-def inpaint_with_propainter(
-    video: Path,
-    masks: Path,
-    output: Path,
-    repository: Path,
-    device: int = 0,
-    subvideo_length: int = 80,
-    fp16: bool = True,
-    episode_chunk_frames: int = 250,
-    overlap_frames: int = 20,
-    workers: int = 1,
-    device_count: int = 1,
-) -> None:
-    typer.echo(
-        inpaint_propainter(
-            video,
-            masks,
-            output,
-            repository,
-            device=device,
-            subvideo_length=subvideo_length,
-            fp16=fp16,
-            episode_chunk_frames=episode_chunk_frames,
-            overlap_frames=overlap_frames,
-            workers=workers,
-            device_count=device_count,
         )
     )
 
@@ -1252,177 +1007,6 @@ def validate_harmonization_command(reference_rgba: Path, candidate_rgba: Path) -
     typer.echo(json.dumps(report, indent=2))
     if not report["ok"]:
         raise typer.Exit(code=1)
-
-
-@app.command("validate-style-refinement")
-def validate_style_refinement_command(
-    reference_video: Path,
-    candidate_video: Path,
-    reference_robot_masks: Path,
-    candidate_robot_masks: Path,
-    protected_masks: Path | None = None,
-    report_output: Path | None = None,
-    accept_manifest: Path | None = None,
-) -> None:
-    report = validate_style_refinement(
-        reference_video,
-        candidate_video,
-        reference_robot_masks,
-        candidate_robot_masks,
-        protected_masks,
-    )
-    if accept_manifest is not None:
-        record_style_validation(accept_manifest, candidate_video, report, report_output)
-    elif report_output is not None:
-        report_output.write_text(json.dumps(report, indent=2) + "\n")
-    typer.echo(json.dumps(report, indent=2))
-    if not report["ok"]:
-        raise typer.Exit(code=1)
-
-
-@app.command("style-vace")
-def style_vace_command(
-    input_video: Path,
-    rgba_frames: Path,
-    output: Path,
-    protected_masks: Path | None = None,
-    start_frame: int = 0,
-    num_frames: int = 49,
-    dilation_px: int = 3,
-    steps: int = 20,
-    guidance_scale: float = 4.0,
-    conditioning_scale: float = 1.0,
-    seed: int = 17,
-    gpu_id: int = 0,
-) -> None:
-    """Generate a temporal VACE appearance candidate; this is not release output."""
-    from .style_vace import run_vace_style_clip
-
-    typer.echo(
-        run_vace_style_clip(
-            input_video,
-            rgba_frames,
-            output,
-            protected_mask_dir=protected_masks,
-            start_frame=start_frame,
-            num_frames=num_frames,
-            dilation_px=dilation_px,
-            steps=steps,
-            guidance_scale=guidance_scale,
-            conditioning_scale=conditioning_scale,
-            seed=seed,
-            gpu_id=gpu_id,
-        )
-    )
-
-
-@app.command("style-vace-batch")
-def style_vace_batch_command(
-    input_video: Path,
-    rgba_frames: Path,
-    output: Path,
-    protected_masks: Path | None = None,
-    chunk_frames: int = 81,
-    overlap: int = 8,
-    gpu_ids: str = "0,1",
-    dilation_px: int = 3,
-    steps: int = 8,
-    guidance_scale: float = 3.5,
-    conditioning_scale: float = 1.0,
-    seed: int = 17,
-) -> None:
-    """Generate overlapping raw VACE windows with one serial process per GPU."""
-    from .style_vace import run_vace_style_batch
-
-    devices = tuple(int(value) for value in gpu_ids.split(",") if value.strip())
-    typer.echo(
-        run_vace_style_batch(
-            input_video,
-            rgba_frames,
-            output,
-            protected_mask_dir=protected_masks,
-            chunk_frames=chunk_frames,
-            overlap=overlap,
-            gpu_ids=devices,
-            dilation_px=dilation_px,
-            steps=steps,
-            guidance_scale=guidance_scale,
-            conditioning_scale=conditioning_scale,
-            seed=seed,
-        )
-    )
-
-
-@app.command("constrain-style")
-def constrain_style_command(
-    reference_video: Path,
-    candidate_video: Path,
-    reference_rgba: Path,
-    output: Path,
-    start_frame: int = 0,
-    protected_masks: Path | None = None,
-    strength: float = 0.75,
-    maximum_channel_delta: int = 72,
-) -> None:
-    """Confine a video style candidate to safe robot-texture changes."""
-    report = apply_mask_constrained_style(
-        reference_video,
-        candidate_video,
-        reference_rgba,
-        output,
-        start_frame=start_frame,
-        protected_mask_dir=protected_masks,
-        strength=strength,
-        maximum_channel_delta=maximum_channel_delta,
-    )
-    typer.echo(json.dumps(report, indent=2))
-
-
-@app.command("constrain-style-batch")
-def constrain_style_batch_command(
-    batch_manifest: Path,
-    output: Path,
-    strength: float = 0.75,
-    maximum_channel_delta: int = 72,
-) -> None:
-    """Center-stitch a VACE batch under the renderer's hard alpha/object constraints."""
-    report = apply_mask_constrained_style_batch(
-        batch_manifest,
-        output,
-        strength=strength,
-        maximum_channel_delta=maximum_channel_delta,
-    )
-    typer.echo(json.dumps(report, indent=2))
-
-
-@app.command("render-manifest")
-def render_manifest(
-    episode: Path,
-    camera_json: Path,
-    output: Path,
-    engine: str = "UnrealRoboticsLab",
-) -> None:
-    camera = json.loads(camera_json.read_text())
-    typer.echo(
-        write_render_manifest(
-            output, episode, camera["intrinsics"], camera["world_from_camera"], engine
-        )
-    )
-
-
-@app.command("cosmos-manifest")
-def cosmos_manifest(
-    composited_video: Path,
-    depth_video: Path,
-    segmentation_video: Path,
-    output: Path,
-    prompt: str = "Photorealistic OpenArm 2.0 performing the demonstrated manipulation",
-) -> None:
-    typer.echo(
-        write_cosmos_transfer_manifest(
-            output, composited_video, depth_video, segmentation_video, prompt
-        )
-    )
 
 
 if __name__ == "__main__":

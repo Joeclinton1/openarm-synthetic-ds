@@ -11,8 +11,8 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from .constants import ARM_JOINT_NAMES, OPENARM_MUJOCO_COMMIT, SIDES
-from .gripper import closure_to_finger_qpos, finger_qpos_addresses
+from .constants import ARM_JOINT_NAMES, EE_BODY_NAMES, OPENARM_MUJOCO_COMMIT, SIDES
+from .gripper import closure_to_finger_qpos, finger_qpos_addresses, pinch_midpoint_local
 from .model import resolve_model
 from .schema import Episode
 
@@ -116,6 +116,11 @@ def export_blender_scene(
         ]
         qpos[side] = model.jnt_qposadr[joint_ids]
     finger_qpos = finger_qpos_addresses(model)
+    ee_bodies = {
+        side: mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, EE_BODY_NAMES[side])
+        for side in SIDES
+    }
+    pinch_frames: dict[str, list[list[float]]] = {side: [] for side in SIDES}
 
     visual_geoms = [
         geom_id
@@ -149,6 +154,11 @@ def export_blender_scene(
             data.qpos[qpos[side]] = episode.joint_position[frame, side_index]
         data.qpos[finger_qpos] = closure_to_finger_qpos(episode.gripper[frame])
         mujoco.mj_forward(model, data)
+        for side_index, side in enumerate(SIDES):
+            body = ee_bodies[side]
+            local = pinch_midpoint_local(episode.gripper[frame, side_index])
+            midpoint = data.xpos[body] + data.xmat[body].reshape(3, 3) @ local
+            pinch_frames[side].append(midpoint.tolist())
         for item in objects:
             geom_id = item["geom_id"]
             transform = np.eye(4)
@@ -227,6 +237,9 @@ def export_blender_scene(
             ),
         },
         "camera": camera,
+        "anchors": {
+            side: {"pinch_center_world_frames": pinch_frames[side]} for side in SIDES
+        },
         "objects": objects,
         "registration_validated": bool(episode.metadata.get("calibrated", False)),
     }

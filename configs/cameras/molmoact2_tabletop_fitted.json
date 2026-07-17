@@ -1,0 +1,21 @@
+{
+  "intrinsics": [
+    [259.633689, 0.0, 241.25022],
+    [0.0, 222.18379, 219.964739],
+    [0.0, 0.0, 1.0]
+  ],
+  "distortion": [0.0, 0.0, 0.0, 0.0, 0.0],
+  "world_from_camera": [
+    [0.7243977833, -0.3006844982, 0.6203520647, 0.26324388],
+    [-0.6820480038, -0.1816829091, 0.7083797294, -0.2450343146],
+    [-0.1002914357, -0.9362585931, -0.3366919584, 0.7314316004],
+    [0.0, 0.0, 0.0, 1.0]
+  ],
+  "output_resolution": [640, 480],
+  "convention": "OpenCV camera: +x right, +y down, +z forward",
+  "calibration_method": "robust fixed-camera fit from 240 audited end-effector image correspondences",
+  "median_reprojection_error_px": 5.13,
+  "p90_reprojection_error_px": 9.63,
+  "projection_calibrated": false,
+  "warning": "Inspection-grade visual registration, not a source-provided metric calibration."
+}
