@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 from collections import defaultdict
@@ -41,11 +42,38 @@ def removal_runtime(clip: Path) -> tuple[str, float]:
     return "minimax_remover", float(payload["elapsed_seconds"])
 
 
+def validated_render_manifests(clip: Path) -> list[dict]:
+    """Load only manifests whose rendered frames match the current scene exactly."""
+    scene_root = clip / "render_scene"
+    side_scenes = [scene_root / f"scene_{side}.json" for side in ("left", "right")]
+    if any(path.exists() for path in side_scenes) and not all(
+        path.exists() for path in side_scenes
+    ):
+        raise ValueError(f"Incomplete bimanual render scenes in {clip}")
+    if all(path.exists() for path in side_scenes):
+        pairs = [
+            (scene, clip / f"render_raw_{side}/render_manifest.json")
+            for side, scene in zip(("left", "right"), side_scenes, strict=True)
+        ]
+    else:
+        pairs = [(scene_root / "scene.json", clip / "render_raw/render_manifest.json")]
+
+    manifests = []
+    for scene, manifest_path in pairs:
+        manifest = json.loads(manifest_path.read_text())
+        scene_sha256 = hashlib.sha256(scene.read_bytes()).hexdigest()
+        if manifest.get("scene_sha256") != scene_sha256:
+            raise ValueError(
+                f"Stale render in {manifest_path}: manifest does not match {scene}"
+            )
+        if manifest.get("missing_frames"):
+            raise ValueError(f"Incomplete render in {manifest_path}")
+        manifests.append(manifest)
+    return manifests
+
+
 def render_runtime(clip: Path) -> float:
-    side_paths = [clip / f"render_raw_{side}/render_manifest.json" for side in ("left", "right")]
-    if all(path.exists() for path in side_paths):
-        return max(float(json.loads(path.read_text())["seconds"]) for path in side_paths)
-    return float(json.loads((clip / "render_raw/render_manifest.json").read_text())["seconds"])
+    return max(float(manifest["seconds"]) for manifest in validated_render_manifests(clip))
 
 
 def kinematic_metrics(trajectory: Path) -> dict[str, float]:

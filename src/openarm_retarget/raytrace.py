@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -391,7 +392,9 @@ def render_blender_batch(
 ) -> Path:
     """Render disjoint frame ranges concurrently and write a resumable benchmark manifest."""
     scene = Path(scene).resolve()
-    spec = json.loads(scene.read_text())
+    scene_bytes = scene.read_bytes()
+    scene_sha256 = hashlib.sha256(scene_bytes).hexdigest()
+    spec = json.loads(scene_bytes)
     frame_count = int(spec["episode_frames"])
     if max_frames is not None:
         frame_count = min(frame_count, max_frames)
@@ -408,9 +411,22 @@ def render_blender_batch(
     ranges = _frame_ranges(frame_count, workers)
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
+    manifest_path = output / "render_manifest.json"
+    previous_manifest = {}
+    if manifest_path.is_file():
+        try:
+            previous_manifest = json.loads(manifest_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            previous_manifest = {}
+    scene_cache_hit = previous_manifest.get("scene_sha256") == scene_sha256
+    # Existing frame names are reusable only when their manifest binds them to this exact scene.
+    # Otherwise resume mode would silently preserve renders from an older trajectory or camera.
+    effective_resume = resume and scene_cache_hit
     before = {
         path.name for path in output.glob("*.png") if path.is_file() and path.stat().st_size > 100
     }
+    if not effective_resume:
+        before = set()
     expected = {f"{frame:06d}.png" for frame in range(frame_count)}
     depth_root = output / "depth"
     expected_depth = {f"{frame:06d}.npz" for frame in range(frame_count)}
@@ -423,10 +439,14 @@ def render_blender_batch(
 
     # Do not pay Blender's scene-import and shader-compilation cost when a resumed
     # range is already complete. This also makes completed jobs cheap to audit/restart.
-    if resume and expected <= before and (not write_depth or expected_depth <= before_depth):
+    if effective_resume and expected <= before and (
+        not write_depth or expected_depth <= before_depth
+    ):
         manifest = {
             "schema": "openarm-blender-render-batch-v1",
             "scene": str(scene),
+            "scene_sha256": scene_sha256,
+            "scene_cache_hit": True,
             "engine": spec.get("engine", "CYCLES"),
             "device": device,
             "gpu_ids": list(gpu_ids),
@@ -444,9 +464,8 @@ def render_blender_batch(
             "missing_depth_frames": [],
             "resume_noop": True,
         }
-        path = output / "render_manifest.json"
-        path.write_text(json.dumps(manifest, indent=2) + "\n")
-        return path
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        return manifest_path
 
     def run(worker_index: int, frame_range: tuple[int, int]) -> Path:
         gpu_id = gpu_ids[worker_index % len(gpu_ids)] if device != "CPU" else None
@@ -457,7 +476,7 @@ def render_blender_batch(
             device=device,
             start_frame=frame_range[0],
             end_frame=frame_range[1],
-            resume=resume,
+            resume=effective_resume,
             gpu_id=gpu_id,
             write_depth=write_depth,
         )
@@ -488,6 +507,8 @@ def render_blender_batch(
     manifest = {
         "schema": "openarm-blender-render-batch-v1",
         "scene": str(scene),
+        "scene_sha256": scene_sha256,
+        "scene_cache_hit": scene_cache_hit,
         "blender": blender_identity,
         "engine": spec.get("engine", "CYCLES"),
         "device": device,
@@ -506,6 +527,5 @@ def render_blender_batch(
         "missing_depth_frames": missing_depth,
         "resume_noop": False,
     }
-    path = output / "render_manifest.json"
-    path.write_text(json.dumps(manifest, indent=2) + "\n")
-    return path
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    return manifest_path

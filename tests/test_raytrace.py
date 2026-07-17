@@ -1,8 +1,10 @@
+import hashlib
 import json
 
 import mujoco
 import numpy as np
 
+from openarm_retarget import raytrace
 from openarm_retarget.ik import OpenArmIK
 from openarm_retarget.raytrace import (
     _frame_ranges,
@@ -132,8 +134,55 @@ def test_completed_blender_batch_resume_does_not_launch_blender(tmp_path) -> Non
     output.mkdir()
     for frame in range(2):
         (output / f"{frame:06d}.png").write_bytes(b"x" * 101)
+    (output / "render_manifest.json").write_text(
+        json.dumps({"scene_sha256": hashlib.sha256(scene.read_bytes()).hexdigest()})
+    )
     manifest = render_blender_batch(scene, output, blender=tmp_path / "does-not-exist", resume=True)
     report = json.loads(manifest.read_text())
     assert report["resume_noop"]
+    assert report["scene_cache_hit"]
     assert report["new_frames"] == 0
     assert report["resumed_frames"] == 2
+
+
+def test_blender_batch_rerenders_when_scene_hash_changes(tmp_path, monkeypatch) -> None:
+    scene = tmp_path / "scene.json"
+    scene.write_text(
+        json.dumps(
+            {
+                "engine": "BLENDER_EEVEE_NEXT",
+                "episode_frames": 2,
+                "resolution": [64, 48],
+                "samples": 0,
+            }
+        )
+    )
+    output = tmp_path / "rgba"
+    output.mkdir()
+    for frame in range(2):
+        (output / f"{frame:06d}.png").write_bytes(b"old" * 40)
+    (output / "render_manifest.json").write_text(json.dumps({"scene_sha256": "stale"}))
+    calls = []
+
+    def fake_render(_scene, destination, _blender, **kwargs):
+        calls.append(kwargs)
+        for frame in range(kwargs["start_frame"], kwargs["end_frame"]):
+            (destination / f"{frame:06d}.png").write_bytes(b"new" * 40)
+        return destination
+
+    monkeypatch.setattr(raytrace, "render_blender_scene", fake_render)
+    monkeypatch.setattr(raytrace, "_blender_identity", lambda _path: {"version": "test"})
+
+    manifest = render_blender_batch(
+        scene,
+        output,
+        blender=tmp_path / "blender",
+        device="CPU",
+        workers=1,
+        resume=True,
+    )
+
+    report = json.loads(manifest.read_text())
+    assert not report["scene_cache_hit"]
+    assert report["new_frames"] == 2
+    assert calls[0]["resume"] is False

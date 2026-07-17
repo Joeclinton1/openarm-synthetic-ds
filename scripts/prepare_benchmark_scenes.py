@@ -61,6 +61,8 @@ def main() -> None:
             ),
         }
         scene_path.write_text(json.dumps(scene, separators=(",", ":")) + "\n")
+        for side in ("left", "right"):
+            (scene_path.parent / f"scene_{side}.json").unlink(missing_ok=True)
         if active == {"right", "left"}:
             for side in ("left", "right"):
                 side_scene = dict(scene)
