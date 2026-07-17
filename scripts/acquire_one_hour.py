@@ -23,7 +23,6 @@ def main() -> None:
     parser.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_SLICE_BYTES)
     args = parser.parse_args()
     configs = [
-        Path("configs/sources/hiw500.yaml"),
         Path("configs/sources/molmoact2_tabletop.yaml"),
         Path("configs/sources/droid.yaml"),
         Path("configs/sources/rh20t_franka.yaml"),

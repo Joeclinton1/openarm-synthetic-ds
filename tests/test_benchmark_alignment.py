@@ -97,27 +97,3 @@ def test_fixed_shoulder_similarity_uses_one_transform_for_whole_clip() -> None:
     np.testing.assert_allclose(projected_tools, target_tools, atol=1e-5)
     np.testing.assert_allclose(scale, 1.5)
     np.testing.assert_allclose(angle, np.pi / 2)
-
-
-def test_floor_image_offsets_are_shared_and_capped() -> None:
-    floor = np.array([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]])
-    visible = np.ones(3, dtype=bool)
-    shared = np.array([[0.0, 0.0], [50.0, 25.0], [100.0, 50.0]])
-    tracks = {
-        "right": (shared + [500.0, 10.0], np.zeros((3, 2)), visible),
-        "left": (shared + [100.0, 10.0], np.zeros((3, 2)), visible),
-    }
-    offsets, projection = alignment._floor_image_offsets(floor, tracks)
-    np.testing.assert_allclose(offsets, shared)
-    assert np.linalg.svd(projection, compute_uv=False)[0] < 240.0
-
-
-def test_floor_image_offsets_ignore_absent_planar_motion() -> None:
-    floor = np.zeros((4, 3))
-    visible = np.ones(4, dtype=bool)
-    bases = np.array([[10.0, 20.0], [50.0, 80.0], [90.0, 40.0], [20.0, 10.0]])
-    offsets, projection = alignment._floor_image_offsets(
-        floor, {"left": (bases, np.zeros((4, 2)), visible)}
-    )
-    np.testing.assert_allclose(offsets, 0.0)
-    np.testing.assert_allclose(projection, 0.0)

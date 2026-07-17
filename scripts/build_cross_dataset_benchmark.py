@@ -13,9 +13,6 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from openarm_retarget.camera import write_agibot_openarm_camera, write_static_openarm_camera
-from openarm_retarget.presets import integrate_planar_base_velocity
-
-
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "outputs" / "cross_dataset_openarm_benchmark"
 
@@ -51,28 +48,6 @@ SELECTIONS = (
         ROOT / "data/converted/agibot_openarm/episodes/episode_649684.npz",
         ROOT / "data/samples/agibot-world__AgiBotWorld-Alpha/sample/observations/410/649684",
         fixed_start_frame=805,
-    ),
-    Selection(
-        "hiw_500",
-        7,
-        "hang_hanger",
-        30,
-        ROOT / "data/converted/hiw_openarm/episodes/episode_000007.npz",
-        ROOT / "data/samples/BitRobot__HIW-500-LeRobot",
-        "observation.images.head",
-        "crop=640:480:0:0",
-        fixed_start_frame=374,
-    ),
-    Selection(
-        "hiw_500",
-        10,
-        "hang_keys_on_hook",
-        30,
-        ROOT / "data/converted/hiw_openarm/episodes/episode_000010.npz",
-        ROOT / "data/samples/BitRobot__HIW-500-LeRobot",
-        "observation.images.head",
-        "crop=640:480:0:0",
-        fixed_start_frame=474,
     ),
     Selection(
         "molmoact2_tabletop",
@@ -172,25 +147,6 @@ def _episode_rows(root: Path, camera: str) -> dict[int, dict]:
     return {int(row["episode_index"]): row for row in rows}
 
 
-def _hiw_mobile_base_translations(root: Path, episodes: set[int]) -> dict[int, np.ndarray]:
-    table = pq.read_table(
-        root / "sample/data.parquet",
-        columns=["episode_index", "timestamp", "observation.state.wbc"],
-    )
-    episode_column = np.asarray(table["episode_index"])
-    timestamp_column = np.asarray(table["timestamp"], dtype=np.float64)
-    wbc_column = np.asarray(table["observation.state.wbc"].to_pylist(), dtype=np.float64)
-    result = {}
-    for episode in episodes:
-        selected = episode_column == episode
-        if not np.any(selected):
-            raise KeyError(f"HIW sample does not contain episode {episode}")
-        result[episode] = integrate_planar_base_velocity(
-            timestamp_column[selected], wbc_column[selected, :2]
-        )
-    return result
-
-
 def _motion_window(joints: np.ndarray, feasible: np.ndarray, frames: int) -> tuple[int, int]:
     count = len(joints)
     frames = min(frames, count)
@@ -273,7 +229,6 @@ def _write_agibot_camera(
 def main() -> None:
     OUTPUT.mkdir(parents=True, exist_ok=True)
     row_cache: dict[Path, dict[int, dict]] = {}
-    hiw_mobile_cache: dict[int, np.ndarray] | None = None
     manifest: list[dict] = []
     for selection in SELECTIONS:
         if not selection.converted.exists():
@@ -287,18 +242,6 @@ def main() -> None:
             rows = row_cache[selection.source_root]
         with np.load(selection.converted, allow_pickle=False) as archive:
             arrays = {key: archive[key] for key in archive.files}
-        if (
-            selection.dataset == "hiw_500"
-            and "diagnostic_mobile_base_translation_m" not in arrays
-        ):
-            if hiw_mobile_cache is None:
-                hiw_mobile_cache = _hiw_mobile_base_translations(
-                    selection.source_root,
-                    {item.episode for item in SELECTIONS if item.dataset == "hiw_500"},
-                )
-            arrays["diagnostic_mobile_base_translation_m"] = hiw_mobile_cache[
-                selection.episode
-            ]
         first, last = _motion_window(
             arrays["joint_position"], arrays["feasible"], 6 * selection.fps
         )
@@ -353,22 +296,6 @@ def main() -> None:
                 "benchmark_source_video": str(source.relative_to(ROOT)),
             }
         )
-        if selection.dataset == "hiw_500":
-            metadata["mobile_base_model"] = {
-                "translation_velocity_fields": ["pivot_vx", "pivot_vy"],
-                "floor_plane_axes": ["source_x", "source_y"],
-                "fixed_vertical_axis": "source_z",
-                "fixed_height": True,
-                "fixed_orientation": True,
-                "shared_translation_for_both_shoulders": True,
-                "ignored_fields": [
-                    "pivot_vyaw",
-                    "pivot_roll",
-                    "pivot_pitch",
-                    "pivot_yaw",
-                    "pivot_height",
-                ],
-            }
         metadata["active_sides"] = _moving_joint_sides(
             sliced["joint_position"], metadata.get("active_sides", ["right", "left"])
         )

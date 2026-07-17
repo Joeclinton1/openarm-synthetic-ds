@@ -142,12 +142,6 @@ def main() -> None:
                     combined = edge_components(robotseg) | horizontal_edge_components(dark)
                     gripper_addition = nearby_gripper(combined, gripper)
                     source_description = "edge-filtered RobotSeg plus dark-arm appearance prior"
-            elif dataset == "hiw_500" and "hang_hanger" in clip.name:
-                combined = robotseg
-                combined |= read(clip / "masks_manual_left" / f"{index:06d}.png")
-                combined |= read(clip / "masks_manual_right" / f"{index:06d}.png")
-                source_description = "RobotSeg plus two explicit arm tracks"
-                gripper_addition = nearby_gripper(combined, gripper)
             elif dataset == "robomind_agilex_3rgb":
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 dark = (hsv[..., 2] < 100) & (hsv[..., 1] < 190)

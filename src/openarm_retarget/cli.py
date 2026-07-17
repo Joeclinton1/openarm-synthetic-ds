@@ -52,7 +52,7 @@ from .media import (
     validate_embodiment_alignment,
 )
 from .model import fetch_openarm_model
-from .presets import fit_workspace_translation, load_hiw_episode
+from .presets import fit_workspace_translation
 from .raytrace import (
     configure_blender_environment,
     export_blender_scene,
@@ -202,8 +202,6 @@ def convert_episode(
         episode = load_agibot_h5(source, config, allow_uncalibrated)
     elif config.adapter == "agibot_lerobot":
         episode = load_agibot_lerobot_episode(source, config, episode_index, allow_uncalibrated)
-    elif config.name == "HIW-500":
-        episode = load_hiw_episode(source, config, episode_index, allow_uncalibrated, model)
     else:
         episode = load_lerobot_episode(source, config, episode_index, allow_uncalibrated, model)
     if max_frames is not None:

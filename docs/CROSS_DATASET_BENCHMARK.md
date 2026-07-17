@@ -1,8 +1,8 @@
 # Cross-dataset OpenArm video benchmark
 
-The benchmark builds twelve fixed six-second clips under
-`outputs/cross_dataset_openarm_benchmark`: two each from AgiBot World Alpha, HIW-500, MolmoAct2
-Tabletop, DROID, RH20T Franka, and RoboMIND AgileX 3RGB. Generated source video, masks, model
+The benchmark builds ten fixed six-second clips under
+`outputs/cross_dataset_openarm_benchmark`: two each from AgiBot World Alpha, MolmoAct2 Tabletop,
+DROID, RH20T Franka, and RoboMIND AgileX 3RGB. Generated source video, masks, model
 weights, renders, and reports are Git-ignored.
 
 ## Fixed selection
@@ -10,18 +10,13 @@ weights, renders, and reports are Git-ignored.
 | Dataset | Clips | Projection |
 |---|---|---|
 | AgiBot World Alpha | Two water-pouring demonstrations | Recorded moving head camera mapped through the shared OpenArm registration |
-| HIW-500 | Hang hanger; hang keys on hook | Audited source-mask registration; not metric camera calibration |
 | MolmoAct2 Tabletop | Close box; flip mug upright | One fixed inspection camera fit from 240 correspondences |
 | DROID (Franka) | Wipe table with cloth; pour into two bowls | Exterior camera; audited source-mask registration |
 | RH20T cfg5 (Franka) | Unscrew jar lid; put knife on rack | Front camera; audited source-mask registration |
 | RoboMIND AgileX 3RGB | Load plate rack; clean cup with brush | Front camera from bimanual AgileX demonstrations; audited per-side registration |
 
-HIW uses one base/tool convention and a `0.8` workspace scale for both tasks. Its published
-`pivot_vx`/`pivot_vy` signals are integrated as mobile-base translation in the source floor plane.
-Both shoulders share that translation while their mounting orientation, height, scale, and relative
-placement remain constant; pivot yaw/roll/pitch and height are ignored. Molmo uses one shared
-Franka/OpenArm transform, explicit tool-axis correction, and one camera fit for both tasks. No clip
-is independently recentered in robot coordinates.
+Molmo uses one shared Franka/OpenArm transform, explicit tool-axis correction, and one camera fit
+for both tasks. No clip is independently recentered in robot coordinates.
 
 For DROID, RH20T, and RoboMIND, each active OpenArm side uses one clip-wide image transform. Its
 shoulder projection is therefore fixed for the full clip; the renderer never follows the source
@@ -76,8 +71,7 @@ gripper by translating the OpenArm base frame by frame.
 
    AgiBot retains its camera-registered projection. Molmo translates the projected pinch centre to
    the audited gripper track at the fixed apparent scale without changing the fitted 3-D tool
-   direction. HIW projects its measured translation-only floor motion into the image with one
-   shared transform for both shoulders and remains explicitly uncalibrated.
+   direction.
 
 6. Compose the output and regenerate the metrics:
 

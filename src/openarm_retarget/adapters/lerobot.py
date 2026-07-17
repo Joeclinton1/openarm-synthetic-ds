@@ -47,9 +47,6 @@ def _pose(values: np.ndarray, config: SourceConfig) -> np.ndarray:
 def _gripper(values: np.ndarray, config: SourceConfig) -> np.ndarray:
     if config.gripper_mode == "normalized":
         return np.clip(values, 0, 1)
-    if config.gripper_mode == "hiw_trigger_squeeze":
-        # Source trigger is 0..10 and squeeze is 0..1; squeeze has the usable close signal.
-        return np.clip(values, 0, 1)
     if config.gripper_mode == "signed":
         low, high = np.nanpercentile(values, [1, 99])
         return np.clip((values - low) / max(high - low, 1e-6), 0, 1)

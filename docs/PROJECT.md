@@ -8,7 +8,6 @@ generated artifacts live under Git-ignored `data/` and `outputs/` directories.
 | Source | Adapter | Retained benchmark tasks | Calibration status |
 |---|---|---|---|
 | AgiBot World Alpha | Native HDF5 archives | Two water-pouring demonstrations | CAD-informed tool transform and recorded head camera; not physically calibrated |
-| HIW-500 | LeRobot | Hang hanger; hang keys on hook | One shared workspace and tool convention across both tasks; not physically calibrated |
 | MolmoAct2 Tabletop | LeRobot | Close box; flip mug upright | Shared Franka/OpenArm transform and audited fixed-camera fit; not physically calibrated |
 | DROID | LeRobot v3, Franka only | Deterministic one-hour slice, one external RGB view | Automatic shared-frame registration; not physically calibrated |
 | RH20T | LeRobot v3, cfg5 Franka only | Deterministic one-hour slice, one front RGB view | Absolute TCP state; not physically calibrated |
@@ -86,12 +85,12 @@ source distribution.
 Inspect or acquire the public sources with:
 
 ```bash
-uv run openarm-retarget inspect-source configs/sources/hiw500.yaml
-uv run openarm-retarget plan-hour configs/sources/hiw500.yaml
-uv run openarm-retarget download-hour configs/sources/hiw500.yaml --destination data/samples
-uv run openarm-retarget convert-hour configs/sources/hiw500.yaml \
-  data/samples/BitRobot__HIW-500-LeRobot/sample_manifest.json \
-  data/samples/BitRobot__HIW-500-LeRobot/sample/data.parquet data/converted/hiw_openarm
+uv run openarm-retarget inspect-source configs/sources/droid.yaml
+uv run openarm-retarget plan-hour configs/sources/droid.yaml
+uv run openarm-retarget download-hour configs/sources/droid.yaml --destination data/samples
+uv run openarm-retarget convert-hour configs/sources/droid.yaml \
+  data/samples/lerobot__droid_1.0.1/sample_manifest.json \
+  data/samples/lerobot__droid_1.0.1/sample/data.parquet data/converted/droid_openarm
 ```
 
 MolmoAct2 uses the same LeRobot workflow. AgiBot uses `plan-agibot-hour`,
@@ -149,10 +148,9 @@ can be restored only outside the source-robot exclusion mask. Blender EEVEE is t
 renderer and Cycles is available for higher-quality reference frames.
 
 The validator checks frame parity, mask coverage, unchanged background, temporal background error,
-depth ordering, render alignment, embodiment alignment, and OpenArm kinematics. Image registration
-for HIW remains an inspection aid, not metric camera calibration. The Molmo fixed-camera fit has
-5.13 px median and 9.63 px p90 reprojection error across 240 audited correspondences, but is still
-labelled inspection-grade.
+depth ordering, render alignment, embodiment alignment, and OpenArm kinematics. The Molmo
+fixed-camera fit has 5.13 px median and 9.63 px p90 reprojection error across 240 audited
+correspondences, but is still labelled inspection-grade.
 
 ## Publication boundary
 

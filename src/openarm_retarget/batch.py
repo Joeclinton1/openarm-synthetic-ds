@@ -15,7 +15,6 @@ from .adapters import load_agibot_lerobot_episode, load_lerobot_episode
 from .export import export_lerobot_v3
 from .filters import filter_episode
 from .ik import OpenArmIK
-from .presets import load_hiw_episode
 from .registration import auto_register_episode
 from .retarget import apply_registration
 from .schema import Episode, SourceConfig
@@ -37,8 +36,6 @@ def _conversion_signature(config: SourceConfig) -> str:
 def _load_episode(table: pa.Table, config: SourceConfig, episode_index: int) -> Episode:
     if config.adapter == "agibot_lerobot":
         return load_agibot_lerobot_episode(table, config, episode_index, allow_uncalibrated=True)
-    if config.name == "HIW-500":
-        return load_hiw_episode(table, config, episode_index, allow_uncalibrated=True)
     return load_lerobot_episode(table, config, episode_index, allow_uncalibrated=True)
 
 
