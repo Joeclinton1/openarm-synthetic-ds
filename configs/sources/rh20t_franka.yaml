@@ -1,0 +1,23 @@
+name: RH20T Franka cfg5
+repo_id: robot-lev/rh20t_cfg5
+adapter: lerobot
+fps: 10
+rotation_representation: quaternion
+quaternion_order: xyzw
+position_scale: 1.0
+single_arm_side: right
+arm_order: [right]
+calibrated: false
+gripper_mode: width_mm
+gripper_open_value: 80.8
+gripper_closed_value: 0.0
+fields:
+  pose: observation.state.ee_pose
+  gripper: observation.state.gripper
+# The documented front camera. Other cfg5 views, audio, and depth are intentionally excluded.
+cameras: [observation.images.cam_037522062165]
+tabletop_tasks: []
+notes: >-
+  Franka-only cfg5 community LeRobot v3 conversion of RH20T. The source records absolute
+  xyz+xyzw TCP pose and physical gripper width in millimetres. This slice uses RGB only and one
+  front camera; RH20T licensing is scene-dependent and must be checked in the source metadata.

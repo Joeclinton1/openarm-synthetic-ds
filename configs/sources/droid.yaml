@@ -1,0 +1,24 @@
+name: DROID
+repo_id: lerobot/droid_1.0.1
+adapter: lerobot
+fps: 15
+rotation_representation: euler
+rotation_euler_order: xyz
+position_scale: 1.0
+single_arm_side: right
+arm_order: [right]
+calibrated: false
+gripper_mode: calibrated
+# DROID's controller defines normalized closedness: 0=open and 1=closed.
+gripper_open_value: 0.0
+gripper_closed_value: 1.0
+fields:
+  pose: observation.state.cartesian_position
+  gripper: observation.state.gripper_position
+# One external view is the minimal useful visual slice; wrist and exterior_2 stay remote.
+cameras: [observation.images.exterior_1_left]
+tabletop_tasks: []
+notes: >-
+  One Franka embodiment from the public LeRobot v3 conversion. Cartesian state is absolute
+  xyz-rpy in the Franka base frame. Automatic workspace/tool registration is inspection-grade;
+  physical Franka-to-OpenArm and camera calibration are still required.

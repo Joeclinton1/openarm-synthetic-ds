@@ -13,8 +13,6 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from openarm_retarget.camera import write_agibot_openarm_camera, write_static_openarm_camera
-
-
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "outputs" / "cross_dataset_openarm_benchmark"
 
@@ -52,28 +50,6 @@ SELECTIONS = (
         fixed_start_frame=805,
     ),
     Selection(
-        "hiw_500",
-        7,
-        "hang_hanger",
-        30,
-        ROOT / "data/converted/hiw_openarm/episodes/episode_000007.npz",
-        ROOT / "data/samples/BitRobot__HIW-500-LeRobot",
-        "observation.images.head",
-        "crop=640:480:0:0",
-        fixed_start_frame=374,
-    ),
-    Selection(
-        "hiw_500",
-        10,
-        "hang_keys_on_hook",
-        30,
-        ROOT / "data/converted/hiw_openarm/episodes/episode_000010.npz",
-        ROOT / "data/samples/BitRobot__HIW-500-LeRobot",
-        "observation.images.head",
-        "crop=640:480:0:0",
-        fixed_start_frame=474,
-    ),
-    Selection(
         "molmoact2_tabletop",
         0,
         "close_box",
@@ -93,13 +69,81 @@ SELECTIONS = (
         "observation.images.primary",
         fixed_start_frame=415,
     ),
+    Selection(
+        "droid",
+        13,
+        "wipe_table_with_cloth",
+        15,
+        ROOT / "data/converted/droid_openarm/episodes/episode_000013.npz",
+        ROOT / "data/samples/lerobot__droid_1.0.1",
+        "observation.images.exterior_1_left",
+        fixed_start_frame=252,
+    ),
+    Selection(
+        "droid",
+        55,
+        "pour_into_two_bowls",
+        15,
+        ROOT / "data/converted/droid_openarm/episodes/episode_000055.npz",
+        ROOT / "data/samples/lerobot__droid_1.0.1",
+        "observation.images.exterior_1_left",
+        fixed_start_frame=180,
+    ),
+    Selection(
+        "rh20t_franka",
+        35,
+        "unscrew_jar_lid",
+        10,
+        ROOT / "data/converted/rh20t_franka_openarm/episodes/episode_000035.npz",
+        ROOT / "data/samples/robot-lev__rh20t_cfg5",
+        "observation.images.cam_037522062165",
+        fixed_start_frame=392,
+    ),
+    Selection(
+        "rh20t_franka",
+        73,
+        "put_knife_on_rack",
+        10,
+        ROOT / "data/converted/rh20t_franka_openarm/episodes/episode_000073.npz",
+        ROOT / "data/samples/robot-lev__rh20t_cfg5",
+        "observation.images.cam_037522062165",
+        fixed_start_frame=265,
+    ),
+    Selection(
+        "robomind_agilex_3rgb",
+        16,
+        "load_plate_rack",
+        30,
+        ROOT / "data/converted/robomind_agilex_openarm/episodes/episode_000016.npz",
+        ROOT / "data/samples/Traly__RoboMIND-lerobot/agilex_3rgb",
+        "observation.images.camera_front",
+        fixed_start_frame=337,
+    ),
+    Selection(
+        "robomind_agilex_3rgb",
+        215,
+        "clean_cup_with_brush",
+        30,
+        ROOT
+        / "data/converted/robomind_agilex_benchmark_supplement/episodes/episode_000215.npz",
+        ROOT / "data/samples/Traly__RoboMIND-lerobot/agilex_3rgb",
+        "observation.images.camera_front",
+        fixed_start_frame=177,
+    ),
 )
 
 
-def _episode_rows(root: Path) -> dict[int, dict]:
+def _episode_rows(root: Path, camera: str) -> dict[int, dict]:
+    columns = [
+        "episode_index",
+        "tasks",
+        f"videos/{camera}/chunk_index",
+        f"videos/{camera}/file_index",
+        f"videos/{camera}/from_timestamp",
+    ]
     rows: list[dict] = []
     for path in sorted((root / "meta/episodes").rglob("*.parquet")):
-        rows.extend(pq.read_table(path).to_pylist())
+        rows.extend(pq.read_table(path, columns=columns).to_pylist())
     return {int(row["episode_index"]): row for row in rows}
 
 
@@ -192,7 +236,9 @@ def main() -> None:
         rows = None
         if selection.camera:
             if selection.source_root not in row_cache:
-                row_cache[selection.source_root] = _episode_rows(selection.source_root)
+                row_cache[selection.source_root] = _episode_rows(
+                    selection.source_root, selection.camera
+                )
             rows = row_cache[selection.source_root]
         with np.load(selection.converted, allow_pickle=False) as archive:
             arrays = {key: archive[key] for key in archive.files}

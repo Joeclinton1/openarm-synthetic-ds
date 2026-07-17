@@ -1,9 +1,10 @@
 # OpenArm 2.0 dataset retargeting
 
-Retarget Cartesian demonstrations from AgiBot World Alpha, HIW-500, and MolmoAct2 Tabletop to
-the official OpenArm 2.0 bimanual model. The repository contains the conversion, temporally
-smooth 7-DoF IK, feasibility checks, deterministic Blender rendering, robot removal, compositing,
-and validation code used for the six-clip cross-dataset benchmark.
+Retarget Cartesian demonstrations from AgiBot World Alpha, MolmoAct2 Tabletop, DROID, RH20T
+Franka, and RoboMIND AgileX 3RGB to the official OpenArm 2.0 bimanual model. The repository
+contains the conversion, temporally smooth 7-DoF IK, feasibility checks, deterministic Blender
+rendering, robot removal, compositing, and validation code used for the ten-clip cross-dataset
+benchmark.
 
 Generated datasets, source media, model weights, and videos are intentionally excluded from Git.
 

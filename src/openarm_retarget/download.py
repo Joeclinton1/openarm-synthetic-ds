@@ -14,6 +14,9 @@ from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
 
 
+DEFAULT_MAX_SLICE_BYTES = 20_000_000_000
+
+
 @dataclass(frozen=True)
 class SelectedEpisode:
     episode_index: int
@@ -65,8 +68,16 @@ def plan_lerobot_hour(
     task_keywords: list[str] | None = None,
     token: str | None = None,
     prefix: str = "",
+    cameras: list[str] | None = None,
+    max_bytes: int = DEFAULT_MAX_SLICE_BYTES,
 ) -> tuple[dict[str, Any], list[SelectedEpisode]]:
     """Create a deterministic whole-episode plan totaling at least the requested duration."""
+    if max_bytes > DEFAULT_MAX_SLICE_BYTES:
+        raise ValueError(
+            f"max_bytes cannot exceed the hard {DEFAULT_MAX_SLICE_BYTES:,}-byte slice limit"
+        )
+    if max_bytes <= 0:
+        raise ValueError("max_bytes must be positive")
     root = Path(destination) / repo_id.replace("/", "__")
     root.mkdir(parents=True, exist_ok=True)
     token = token or os.environ.get("HF_TOKEN")
@@ -76,7 +87,23 @@ def plan_lerobot_hour(
     def remote(name: str) -> str:
         return f"{prefix}/{name}" if prefix else name
 
-    for filename in _metadata_files(repo_id, token, prefix):
+    metadata_files = _metadata_files(repo_id, token, prefix)
+    repo_info = HfApi(token=token).dataset_info(repo_id, token=token, files_metadata=True)
+    remote_sizes = {item.rfilename: item.size for item in repo_info.siblings}
+    missing_metadata_sizes = [
+        name for name in metadata_files if remote_sizes.get(name) is None
+    ]
+    if missing_metadata_sizes:
+        raise RuntimeError(
+            f"Repository does not report metadata sizes for: {missing_metadata_sizes}"
+        )
+    metadata_bytes = sum(int(remote_sizes[name]) for name in metadata_files)
+    if metadata_bytes > max_bytes:
+        raise RuntimeError(
+            f"Required metadata is {metadata_bytes:,} bytes, above the "
+            f"{max_bytes:,}-byte limit"
+        )
+    for filename in metadata_files:
         _download(repo_id, filename, root, token)
     info = json.loads((local_base / "meta/info.json").read_text())
     fps = float(info["fps"])
@@ -116,6 +143,8 @@ def plan_lerobot_hour(
         video_files: list[str] = []
         video_segments: list[dict[str, Any]] = []
         for key in video_keys:
+            if cameras is not None and key not in cameras:
+                continue
             chunk_key = f"videos/{key}/chunk_index"
             file_key = f"videos/{key}/file_index"
             if row.get(chunk_key) is not None:
@@ -154,15 +183,40 @@ def plan_lerobot_hour(
         raise RuntimeError(
             f"{repo_id} contains only {elapsed:.1f}s matching the requested selection"
         )
+    data_files = sorted({episode.data_file for episode in selected})
+    video_files = sorted({name for episode in selected for name in episode.video_files})
+    planned_files = sorted(set(metadata_files + data_files + video_files))
+    missing_sizes = [name for name in planned_files if remote_sizes.get(name) is None]
+    if missing_sizes:
+        raise RuntimeError(f"Repository does not report sizes for: {missing_sizes}")
+    remote_bytes = sum(int(remote_sizes[name]) for name in planned_files)
+    # The filtered sample Parquet is an additional local file. Reserving the full selected source
+    # containers is conservative and guarantees the final manifest footprint before downloading.
+    sample_reserve_bytes = sum(int(remote_sizes[name]) for name in data_files)
+    planned_bytes = remote_bytes + sample_reserve_bytes
+    if planned_bytes > max_bytes:
+        raise RuntimeError(
+            f"Planned slice is {planned_bytes:,} bytes, above the {max_bytes:,}-byte limit; "
+            "select fewer cameras or a source with finer-grained containers"
+        )
     manifest = {
         "repo_id": repo_id,
-        "revision": HfApi(token=token).dataset_info(repo_id, token=token).sha,
+        "revision": repo_info.sha,
         "requested_seconds": seconds,
         "selected_seconds": elapsed,
         "fps": fps,
         "selected_frames": sum(value.frames for value in selected),
         "task_keywords": task_keywords or [],
+        "cameras": cameras,
         "prefix": prefix,
+        "max_slice_bytes": max_bytes,
+        "planned_download_bytes": planned_bytes,
+        "planned_remote_bytes": remote_bytes,
+        "sample_parquet_reserve_bytes": sample_reserve_bytes,
+        "metadata_files": metadata_files,
+        "planned_data_files": data_files,
+        "planned_video_files": video_files,
+        "planned_files": {name: int(remote_sizes[name]) for name in planned_files},
         "episodes": [asdict(value) for value in selected],
     }
     (root / "sample_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -178,6 +232,7 @@ def download_lerobot_hour(
     token: str | None = None,
     metadata_only: bool = False,
     prefix: str = "",
+    max_bytes: int = DEFAULT_MAX_SLICE_BYTES,
 ) -> Path:
     """Download exactly selected episodes plus their shared Parquet/video containers."""
     root = Path(destination) / repo_id.replace("/", "__")
@@ -190,6 +245,8 @@ def download_lerobot_hour(
             task_keywords=task_keywords,
             token=token,
             prefix=prefix,
+            cameras=cameras,
+            max_bytes=max_bytes,
         )
     except (GatedRepoError, HfHubHTTPError) as error:
         status = {
@@ -205,10 +262,6 @@ def download_lerobot_hour(
         return root / "sample_manifest.json"
     data_files = sorted({episode.data_file for episode in selected})
     video_files = sorted({name for episode in selected for name in episode.video_files})
-    if cameras:
-        video_files = [
-            name for name in video_files if any(f"videos/{camera}/" in name for camera in cameras)
-        ]
     for filename in data_files + video_files:
         _download(repo_id, filename, root, token)
 
@@ -226,10 +279,16 @@ def download_lerobot_hour(
     manifest["downloaded_data_files"] = data_files
     manifest["downloaded_video_files"] = video_files
     file_records: dict[str, dict[str, int | str]] = {}
-    for filename in data_files + video_files:
+    for filename in sorted(set(manifest["metadata_files"] + data_files + video_files)):
         file_records[filename] = _file_record(root / filename)
     file_records[manifest["sample_file"]] = _file_record(output)
     manifest["files"] = file_records
+    manifest["downloaded_bytes"] = sum(int(value["bytes"]) for value in file_records.values())
+    if manifest["downloaded_bytes"] > max_bytes:
+        raise RuntimeError(
+            f"Downloaded slice is {manifest['downloaded_bytes']:,} bytes, above the "
+            f"{max_bytes:,}-byte limit"
+        )
     (root / "sample_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return root / "sample_manifest.json"
 
@@ -258,6 +317,10 @@ def verify_download(manifest_path: str | Path, rehash: bool = True) -> dict[str,
             errors.append(f"SHA-256 mismatch: {filename}")
     if not manifest.get("files"):
         errors.append("manifest contains no file checksums; rerun download-hour")
+    downloaded_bytes = sum(int(record["bytes"]) for record in manifest.get("files", {}).values())
+    max_bytes = int(manifest.get("max_slice_bytes", DEFAULT_MAX_SLICE_BYTES))
+    if downloaded_bytes > max_bytes:
+        errors.append(f"downloaded files exceed the {max_bytes}-byte slice limit")
     return {
         "ok": not errors,
         "manifest": str(manifest_path),
@@ -267,6 +330,8 @@ def verify_download(manifest_path: str | Path, rehash: bool = True) -> dict[str,
         "selected_frames": expected_frames,
         "episodes": len(manifest["episodes"]),
         "files": len(manifest.get("files", {})),
+        "downloaded_bytes": downloaded_bytes,
+        "max_slice_bytes": max_bytes,
         "rehash": rehash,
         "errors": errors,
     }

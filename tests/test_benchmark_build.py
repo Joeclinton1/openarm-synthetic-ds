@@ -28,3 +28,11 @@ def test_moving_joint_sides_retains_material_bimanual_motion() -> None:
         "right",
         "left",
     ]
+
+
+def test_new_dataset_families_have_two_distinct_tasks_each() -> None:
+    for dataset in ("droid", "rh20t_franka", "robomind_agilex_3rgb"):
+        selections = [item for item in benchmark.SELECTIONS if item.dataset == dataset]
+        assert len(selections) == 2
+        assert len({item.task for item in selections}) == 2
+        assert len({item.episode for item in selections}) == 2

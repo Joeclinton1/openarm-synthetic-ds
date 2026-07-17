@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BENCHMARK = ROOT / "outputs/cross_dataset_openarm_benchmark"
 SIDES = ("right", "left")
 MOLMO_FIXED_CAMERA_RENDER_SCALE = 0.825
+FIXED_SHOULDER_DATASETS = {"droid", "rh20t_franka", "robomind_agilex_3rgb"}
 
 
 def alpha_over(bottom: np.ndarray, top: np.ndarray) -> np.ndarray:
@@ -86,7 +87,7 @@ def _source_mask(clip: Path, side: str, index: int, active_count: int) -> np.nda
         mask = _read_mask(manual)
         return mask if int(mask.sum()) >= 64 else None
     # Some source fixtures provide one audited robot mask for the whole demonstration instead of
-    # arm-specific masks.  It is unambiguous when only one retargeted arm is active (HIW keys).
+    # arm-specific masks. It is unambiguous when only one retargeted arm is active.
     manual_demo = clip / "masks_manual_a" / f"{index:06d}.png"
     if active_count == 1 and manual_demo.exists():
         component = _edge_component(_read_mask(manual_demo), None)
@@ -331,6 +332,33 @@ def _fixed_scale_tool_similarity(
     return matrix, scale, float(np.arctan2(sine, cosine))
 
 
+def _fixed_shoulder_similarity(
+    source_bases: np.ndarray,
+    source_tools: np.ndarray,
+    target_bases: np.ndarray,
+    target_tools: np.ndarray,
+) -> tuple[np.ndarray, float, float, np.ndarray]:
+    """Fit one clip-wide similarity while pinning the target shoulder to one image point."""
+    source_axes = np.asarray(source_tools) - np.asarray(source_bases)
+    target_axes = np.asarray(target_tools) - np.asarray(target_bases)
+    if len(source_axes) == 0 or np.any(np.linalg.norm(source_axes, axis=1) < 1e-6):
+        raise RuntimeError("Degenerate fixed-shoulder source projection")
+    source_complex = source_axes[:, 0] + 1j * source_axes[:, 1]
+    target_complex = target_axes[:, 0] + 1j * target_axes[:, 1]
+    coefficient = np.sum(np.conj(source_complex) * target_complex) / np.sum(
+        np.abs(source_complex) ** 2
+    )
+    angle = float(np.angle(coefficient))
+    scale = float(np.clip(np.abs(coefficient), 0.35, 2.2))
+    cosine, sine = np.cos(angle), np.sin(angle)
+    linear = scale * np.asarray([[cosine, -sine], [sine, cosine]], dtype=np.float64)
+    source_shoulder = np.median(source_bases, axis=0)
+    target_shoulder = np.median(target_bases, axis=0)
+    translation = target_shoulder - linear @ source_shoulder
+    matrix = np.column_stack([linear, translation]).astype(np.float32)
+    return matrix, scale, angle, target_shoulder
+
+
 def _edge_tool_similarity(
     rgba: np.ndarray,
     source_base: np.ndarray,
@@ -511,6 +539,20 @@ def align_clip(clip: Path) -> dict:
     if not tracks:
         raise RuntimeError(f"No source arm tracks in {clip}")
 
+    fixed_shoulder_mode = clip.parent.name in FIXED_SHOULDER_DATASETS
+    fixed_shoulder_transforms: dict[str, tuple[np.ndarray, float, float, np.ndarray]] = {}
+    if fixed_shoulder_mode:
+        for side, (target_bases, target_tools, visible) in tracks.items():
+            indices = np.where(visible)[0]
+            source_points = [
+                _scene_side_points(scene, side, int(index))[:2] for index in indices
+            ]
+            fixed_shoulder_transforms[side] = _fixed_shoulder_similarity(
+                np.stack([value[0] for value in source_points]),
+                np.stack([value[1] for value in source_points]),
+                target_bases[indices],
+                target_tools[indices],
+            )
     fixed_scales: dict[str, float] = {}
     if agibot_active_arm_mode:
         for side, (target_bases, target_tools, visible) in tracks.items():
@@ -533,6 +575,7 @@ def align_clip(clip: Path) -> dict:
             "scales": [],
             "angles": [],
             "base_errors": [],
+            "base_positions": [],
             "tool_errors": [],
             "visible": 0,
         }
@@ -558,7 +601,9 @@ def align_clip(clip: Path) -> dict:
             if not visible[index]:
                 continue
             source_base, source_tool, _ = _scene_side_points(scene, side, index)
-            if side in fixed_scales:
+            if fixed_shoulder_mode:
+                matrix, scale, angle, target_shoulder = fixed_shoulder_transforms[side]
+            elif side in fixed_scales:
                 matrix, scale, angle = _fixed_scale_tool_similarity(
                     source_base,
                     source_tool,
@@ -580,7 +625,9 @@ def align_clip(clip: Path) -> dict:
             # For an uncalibrated source, the two observable constraints that must remain exact are
             # where the arm enters the image and where its tool acts.  A silhouette-only scale can
             # look superficially plausible while moving the base to the wrong image edge.
-            if not agibot_active_arm_mode:
+            if fixed_shoulder_mode:
+                pass
+            elif not agibot_active_arm_mode:
                 if molmo_camera_fit:
                     # The fitted fixed camera already supplies the correct 3-D projection,
                     # including wrist direction. Keep one audited apparent-size correction for
@@ -608,15 +655,22 @@ def align_clip(clip: Path) -> dict:
                 borderValue=(0, 0, 0, 0),
             )
             aligned_sides.append(aligned)
+            projected_base = matrix[:, :2] @ source_base + matrix[:, 2]
             projected_tool = matrix[:, :2] @ source_tool + matrix[:, 2]
             stats = side_stats[side]
             stats["scales"].append(scale)
             stats["angles"].append(angle)
-            stats["base_errors"].append(
-                _entry_error(aligned[..., 3] > 2, target_bases[index])
-                if not agibot_active_arm_mode
-                else 0.0
-            )
+            stats["base_positions"].append(projected_base)
+            if fixed_shoulder_mode:
+                stats["base_errors"].append(
+                    float(np.linalg.norm(projected_base - target_shoulder))
+                )
+            else:
+                stats["base_errors"].append(
+                    _entry_error(aligned[..., 3] > 2, target_bases[index])
+                    if not agibot_active_arm_mode
+                    else 0.0
+                )
             stats["tool_errors"].append(float(np.linalg.norm(projected_tool - target_tools[index])))
             stats["visible"] = int(stats["visible"]) + int(visible[index])
         result = np.zeros((480, 640, 4), dtype=np.uint8)
@@ -632,11 +686,18 @@ def align_clip(clip: Path) -> dict:
 
     side_summary = {}
     for side, stats in side_stats.items():
+        base_positions = np.asarray(stats["base_positions"])
+        base_position_mean = np.mean(base_positions, axis=0)
         side_summary[side] = {
             "visible_frames": int(stats["visible"]),
             "mean_scale": float(np.mean(stats["scales"])),
             "mean_rotation_deg": float(np.rad2deg(np.mean(stats["angles"]))),
+            "rotation_std_deg": float(np.rad2deg(np.std(stats["angles"]))),
+            "scale_std": float(np.std(stats["scales"])),
             "base_anchor_rmse_px": float(np.sqrt(np.mean(np.square(stats["base_errors"])))),
+            "shoulder_position_std_px": float(
+                np.sqrt(np.mean(np.sum(np.square(base_positions - base_position_mean), axis=1)))
+            ),
             "tool_anchor_rmse_px": float(np.sqrt(np.mean(np.square(stats["tool_errors"])))),
             "source_track": (
                 f"masks_manual_{side}"
@@ -653,7 +714,9 @@ def align_clip(clip: Path) -> dict:
     )
     manifest = {
         "method": (
-            scale_method
+            "clip-wide fixed-shoulder similarity"
+            if fixed_shoulder_mode
+            else scale_method
             if molmo_camera_fit
             else f"rigid per-arm tool registration with {scale_method}"
         ),
@@ -663,10 +726,20 @@ def align_clip(clip: Path) -> dict:
         "aligned_sides": list(tracks),
         "agibot_active_arm_mode": agibot_active_arm_mode,
         "fixed_side_scales": fixed_scales,
+        "fixed_shoulder": fixed_shoulder_mode,
+        "fixed_shoulder_anchors_px": {
+            side: transform[3].tolist()
+            for side, transform in fixed_shoulder_transforms.items()
+        },
         "side_metrics": side_summary,
         "render_alpha_inside_source_mask": overlap_intersection / max(overlap_render, 1),
         "source_mask_covered_by_render": overlap_intersection / max(overlap_source, 1),
-        "warning": "2-D source-track registration is for visual review, not metric supervision.",
+        "warning": (
+            "One clip-wide 2-D similarity fixes each OpenArm shoulder; source tool overlap is "
+            "diagnostic and is not forced per frame."
+            if fixed_shoulder_mode
+            else "2-D source-track registration is for visual review, not metric supervision."
+        ),
     }
     (output / "alignment_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest

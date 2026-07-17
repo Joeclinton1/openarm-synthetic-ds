@@ -36,6 +36,22 @@ def edge_components(mask: np.ndarray) -> np.ndarray:
     return result
 
 
+def non_bottom_edge_components(mask: np.ndarray) -> np.ndarray:
+    """Keep dark robot housings entering from the top/sides, excluding the dark tabletop."""
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        mask.astype(np.uint8), connectivity=8
+    )
+    result = np.zeros_like(mask)
+    height, width = mask.shape
+    for label in range(1, count):
+        x, y, box_width, box_height, area = stats[label]
+        touches_entry_edge = x <= 2 or x + box_width >= width - 2 or y <= 2
+        touches_bottom = y + box_height >= height - 2
+        if touches_entry_edge and not touches_bottom and area >= 32:
+            result |= labels == label
+    return result
+
+
 def horizontal_edge_components(mask: np.ndarray) -> np.ndarray:
     count, labels, stats, _ = cv2.connectedComponentsWithStats(
         mask.astype(np.uint8), connectivity=8
@@ -126,11 +142,16 @@ def main() -> None:
                     combined = edge_components(robotseg) | horizontal_edge_components(dark)
                     gripper_addition = nearby_gripper(combined, gripper)
                     source_description = "edge-filtered RobotSeg plus dark-arm appearance prior"
-            elif dataset == "hiw_500" and "hang_hanger" in clip.name:
-                combined = robotseg
-                combined |= read(clip / "masks_manual_left" / f"{index:06d}.png")
-                combined |= read(clip / "masks_manual_right" / f"{index:06d}.png")
-                source_description = "RobotSeg plus two explicit arm tracks"
+            elif dataset == "robomind_agilex_3rgb":
+                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                dark = (hsv[..., 2] < 100) & (hsv[..., 1] < 190)
+                dark = cv2.morphologyEx(
+                    dark.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)
+                ).astype(bool)
+                combined = robotseg | non_bottom_edge_components(dark)
+                source_description = (
+                    "RobotSeg plus non-bottom-edge dark AgileX appearance prior"
+                )
                 gripper_addition = nearby_gripper(combined, gripper)
             else:
                 combined = robotseg

@@ -78,3 +78,22 @@ def test_mask_anchors_can_use_known_mounting_border() -> None:
     base, tool = anchors
     assert base[1] >= 190
     assert tool[1] < 80
+
+
+def test_fixed_shoulder_similarity_uses_one_transform_for_whole_clip() -> None:
+    source_bases = np.repeat([[300.0, 200.0]], 3, axis=0)
+    source_tools = np.array([[400.0, 200.0], [380.0, 240.0], [360.0, 260.0]])
+    target_bases = np.repeat([[20.0, 100.0]], 3, axis=0)
+    rotation = np.array([[0.0, -1.5], [1.5, 0.0]])
+    target_tools = target_bases + (source_tools - source_bases) @ rotation.T
+
+    matrix, scale, angle, shoulder = alignment._fixed_shoulder_similarity(
+        source_bases, source_tools, target_bases, target_tools
+    )
+
+    projected_bases = source_bases @ matrix[:, :2].T + matrix[:, 2]
+    projected_tools = source_tools @ matrix[:, :2].T + matrix[:, 2]
+    np.testing.assert_allclose(projected_bases, np.repeat([shoulder], 3, axis=0), atol=1e-5)
+    np.testing.assert_allclose(projected_tools, target_tools, atol=1e-5)
+    np.testing.assert_allclose(scale, 1.5)
+    np.testing.assert_allclose(angle, np.pi / 2)

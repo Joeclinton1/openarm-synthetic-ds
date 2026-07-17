@@ -8,8 +8,10 @@ generated artifacts live under Git-ignored `data/` and `outputs/` directories.
 | Source | Adapter | Retained benchmark tasks | Calibration status |
 |---|---|---|---|
 | AgiBot World Alpha | Native HDF5 archives | Two water-pouring demonstrations | CAD-informed tool transform and recorded head camera; not physically calibrated |
-| HIW-500 | LeRobot | Hang hanger; hang keys on hook | One shared workspace and tool convention across both tasks; not physically calibrated |
 | MolmoAct2 Tabletop | LeRobot | Close box; flip mug upright | Shared Franka/OpenArm transform and audited fixed-camera fit; not physically calibrated |
+| DROID | LeRobot v3, Franka only | Deterministic one-hour slice, one external RGB view | Automatic shared-frame registration; not physically calibrated |
+| RH20T | LeRobot v3, cfg5 Franka only | Deterministic one-hour slice, one front RGB view | Absolute TCP state; not physically calibrated |
+| RoboMIND | LeRobot v3, AgileX 3RGB only | Deterministic one-hour bimanual slice, all three RGB views | Automatic shared-frame registration; not physically calibrated |
 
 The source definitions are in `configs/sources/`. The Molmo camera fit is in
 `configs/cameras/molmoact2_tabletop_fitted.json`. Dataset access, use, and redistribution remain
@@ -83,17 +85,44 @@ source distribution.
 Inspect or acquire the public sources with:
 
 ```bash
-uv run openarm-retarget inspect-source configs/sources/hiw500.yaml
-uv run openarm-retarget plan-hour configs/sources/hiw500.yaml
-uv run openarm-retarget download-hour configs/sources/hiw500.yaml data/samples
-uv run openarm-retarget convert-hour configs/sources/hiw500.yaml \
-  data/samples/BitRobot__HIW-500-LeRobot data/converted/hiw_openarm
+uv run openarm-retarget inspect-source configs/sources/droid.yaml
+uv run openarm-retarget plan-hour configs/sources/droid.yaml
+uv run openarm-retarget download-hour configs/sources/droid.yaml --destination data/samples
+uv run openarm-retarget convert-hour configs/sources/droid.yaml \
+  data/samples/lerobot__droid_1.0.1/sample_manifest.json \
+  data/samples/lerobot__droid_1.0.1/sample/data.parquet data/converted/droid_openarm
 ```
 
 MolmoAct2 uses the same LeRobot workflow. AgiBot uses `plan-agibot-hour`,
 `download-agibot-hour`, `extract-agibot-hour`, and `convert-agibot-hour` because its original data
 is distributed as gated archives. `scripts/acquire_one_hour.py` records the fixed local acquisition
-plan for all three supported sources.
+plan for all supported LeRobot sources and audits access to the original AgiBot repository.
+
+DROID, RH20T Franka cfg5, and RoboMIND AgileX 3RGB use the same LeRobot commands. Their source
+configs pin exactly one embodiment and a minimal camera selection. Every plan and download has a
+20,000,000,000-byte ceiling by default; planning fails before trajectory/video containers are
+downloaded if the selected slice would exceed it:
+
+```bash
+uv run openarm-retarget plan-hour configs/sources/droid.yaml
+uv run openarm-retarget download-hour configs/sources/droid.yaml --destination data/samples
+uv run openarm-retarget convert-hour configs/sources/droid.yaml \
+  data/samples/lerobot__droid_1.0.1/sample_manifest.json \
+  data/samples/lerobot__droid_1.0.1/sample/data.parquet data/converted/droid_openarm \
+  --workers 8
+```
+
+Use `rh20t_franka.yaml` or `robomind_agilex_3rgb.yaml` identically. DROID downloads one exterior
+view, RH20T downloads one front view, and the explicitly 3RGB RoboMIND subset retains front plus
+both wrist views. `--max-bytes` may lower, but not silently bypass, the acquisition ceiling.
+
+Audit converted slices together with:
+
+```bash
+uv run openarm-retarget audit-all \
+  data/converted/droid_openarm data/converted/rh20t_franka_openarm \
+  data/converted/robomind_agilex_openarm --output data/converted/three_dataset_audit.json
+```
 
 For a single converted episode:
 
@@ -119,10 +148,9 @@ can be restored only outside the source-robot exclusion mask. Blender EEVEE is t
 renderer and Cycles is available for higher-quality reference frames.
 
 The validator checks frame parity, mask coverage, unchanged background, temporal background error,
-depth ordering, render alignment, embodiment alignment, and OpenArm kinematics. Image registration
-for HIW remains an inspection aid, not metric camera calibration. The Molmo fixed-camera fit has
-5.13 px median and 9.63 px p90 reprojection error across 240 audited correspondences, but is still
-labelled inspection-grade.
+depth ordering, render alignment, embodiment alignment, and OpenArm kinematics. The Molmo
+fixed-camera fit has 5.13 px median and 9.63 px p90 reprojection error across 240 audited
+correspondences, but is still labelled inspection-grade.
 
 ## Publication boundary
 

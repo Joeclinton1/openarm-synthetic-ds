@@ -25,19 +25,40 @@ def _rotation(values: np.ndarray, config: SourceConfig) -> np.ndarray:
     raise ValueError(f"Unsupported rotation representation: {representation}")
 
 
-def _pose_from_six(values: np.ndarray, config: SourceConfig) -> np.ndarray:
-    return np.concatenate([values[:, :3], _rotation(values[:, 3:], config)], axis=1)
+def _pose(values: np.ndarray, config: SourceConfig) -> np.ndarray:
+    """Decode xyz plus an Euler/rotation-vector triplet or quaternion.
+
+    Some community LeRobot conversions retain a seventh gripper value after an xyz-rpy pose.
+    For non-quaternion sources it is deliberately ignored here and read through the explicit
+    gripper field instead.
+    """
+    rotation_width = 4 if config.rotation_representation == "quaternion" else 3
+    expected = 3 + rotation_width
+    if values.ndim != 2 or values.shape[1] < expected:
+        raise ValueError(
+            f"Cartesian pose must contain at least {expected} values for "
+            f"{config.rotation_representation}, got {values.shape}"
+        )
+    return np.concatenate(
+        [values[:, :3], _rotation(values[:, 3 : 3 + rotation_width], config)], axis=1
+    )
 
 
 def _gripper(values: np.ndarray, config: SourceConfig) -> np.ndarray:
     if config.gripper_mode == "normalized":
         return np.clip(values, 0, 1)
-    if config.gripper_mode == "hiw_trigger_squeeze":
-        # Source trigger is 0..10 and squeeze is 0..1; squeeze has the usable close signal.
-        return np.clip(values, 0, 1)
     if config.gripper_mode == "signed":
         low, high = np.nanpercentile(values, [1, 99])
         return np.clip((values - low) / max(high - low, 1e-6), 0, 1)
+    if config.gripper_mode in {"calibrated", "width_mm"}:
+        if config.gripper_open_value is None or config.gripper_closed_value is None:
+            raise ValueError(
+                f"{config.gripper_mode} gripper mode requires open and closed values"
+            )
+        span = config.gripper_closed_value - config.gripper_open_value
+        if abs(span) < 1e-9:
+            raise ValueError("gripper open and closed values must differ")
+        return np.clip((values - config.gripper_open_value) / span, 0, 1)
     if config.gripper_mode == "mean_fingers":
         return np.clip(np.mean(values, axis=-1), 0, 1)
     if config.gripper_mode == "brainco_fingers":
@@ -64,7 +85,11 @@ def load_lerobot_episode(
     if table.num_rows == 0:
         raise KeyError(f"Episode {episode_index} not present in source table")
     timestamp = np.asarray(table["timestamp"], dtype=np.float64)
-    pose_values = np.asarray(table[config.fields["pose"]].to_pylist(), dtype=np.float64)
+    pose_values = (
+        np.asarray(table[config.fields["pose"]].to_pylist(), dtype=np.float64)
+        if "pose" in config.fields
+        else None
+    )
     poses = np.empty((len(timestamp), 2, 7), dtype=np.float64)
     grippers = np.zeros((len(timestamp), 2), dtype=np.float64)
     ik = OpenArmIK(model_path)
@@ -74,7 +99,7 @@ def load_lerobot_episode(
     if config.single_arm_side:
         target = SIDES.index(config.single_arm_side)
         poses[:, target] = config.pose_transform(config.single_arm_side).apply(
-            _pose_from_six(pose_values[:, :6], config)
+            _pose(pose_values, config)
         )
         if "gripper" in config.fields:
             values = np.asarray(table[config.fields["gripper"]].to_pylist(), dtype=np.float64)
@@ -82,14 +107,42 @@ def load_lerobot_episode(
                 values = values[:, int(config.fields.get("gripper_index", 0))]
             grippers[:, target] = _gripper(values, config)
     else:
-        if pose_values.shape[1] != 12:
-            raise ValueError("Bimanual Cartesian field must contain two 6D poses")
-        for source_index, side in enumerate(config.arm_order):
-            target_index = SIDES.index(side)
-            poses[:, target_index] = config.pose_transform(side).apply(
-                _pose_from_six(pose_values[:, source_index * 6 : (source_index + 1) * 6], config)
-            )
-        if "gripper" in config.fields:
+        separate_pose_fields = all(f"pose_{side}" in config.fields for side in config.arm_order)
+        if separate_pose_fields:
+            for side in config.arm_order:
+                values = np.asarray(
+                    table[config.fields[f"pose_{side}"]].to_pylist(), dtype=np.float64
+                )
+                poses[:, SIDES.index(side)] = config.pose_transform(side).apply(
+                    _pose(values, config)
+                )
+        else:
+            if pose_values is None:
+                raise ValueError("Bimanual source needs pose or per-side pose fields")
+            rotation_width = 4 if config.rotation_representation == "quaternion" else 3
+            pose_width = 3 + rotation_width
+            if pose_values.shape[1] != pose_width * 2:
+                raise ValueError(
+                    f"Bimanual Cartesian field must contain two {pose_width}D poses"
+                )
+            for source_index, side in enumerate(config.arm_order):
+                target_index = SIDES.index(side)
+                poses[:, target_index] = config.pose_transform(side).apply(
+                    _pose(
+                        pose_values[:, source_index * pose_width : (source_index + 1) * pose_width],
+                        config,
+                    )
+                )
+        separate_gripper_fields = all(
+            f"gripper_{side}" in config.fields for side in config.arm_order
+        )
+        if separate_gripper_fields:
+            for side in config.arm_order:
+                values = np.asarray(
+                    table[config.fields[f"gripper_{side}"]].to_pylist(), dtype=np.float64
+                )
+                grippers[:, SIDES.index(side)] = _gripper(values, config)
+        elif "gripper" in config.fields:
             values = np.asarray(table[config.fields["gripper"]].to_pylist(), dtype=np.float64)
             if values.shape[1] == 2:
                 for source_index, side in enumerate(config.arm_order):

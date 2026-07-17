@@ -6,7 +6,12 @@ import argparse
 import json
 from pathlib import Path
 
-from openarm_retarget.download import download_lerobot_hour, probe_repo, verify_download
+from openarm_retarget.download import (
+    DEFAULT_MAX_SLICE_BYTES,
+    download_lerobot_hour,
+    probe_repo,
+    verify_download,
+)
 from openarm_retarget.schema import SourceConfig
 
 
@@ -15,10 +20,13 @@ def main() -> None:
     parser.add_argument("--destination", type=Path, default=Path("data/samples"))
     parser.add_argument("--seconds", type=float, default=3600)
     parser.add_argument("--metadata-only", action="store_true")
+    parser.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_SLICE_BYTES)
     args = parser.parse_args()
     configs = [
-        Path("configs/sources/hiw500.yaml"),
         Path("configs/sources/molmoact2_tabletop.yaml"),
+        Path("configs/sources/droid.yaml"),
+        Path("configs/sources/rh20t_franka.yaml"),
+        Path("configs/sources/robomind_agilex_3rgb.yaml"),
     ]
     report: dict[str, object] = {}
     for path in configs:
@@ -34,9 +42,10 @@ def main() -> None:
                     args.destination,
                     args.seconds,
                     config.tabletop_tasks,
-                    cameras=[],
+                    cameras=config.cameras or [],
                     metadata_only=args.metadata_only,
                     prefix=config.dataset_prefix,
+                    max_bytes=args.max_bytes,
                 )
             report[config.name] = (
                 verify_download(manifest, rehash=False)
