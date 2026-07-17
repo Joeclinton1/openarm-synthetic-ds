@@ -23,4 +23,6 @@ fields:
 tabletop_tasks: [hang hanger, hang keys]
 notes: >-
   The published WBC vector is pivot[0:7], left xyz-rpy[7:13], right xyz-rpy[13:19],
-  then left/right trigger+squeeze. G1 root-to-OpenArm root calibration remains required.
+  then left/right trigger+squeeze. Mobile-base motion integrates only pivot_vx/pivot_vy in the
+  source floor plane; pivot rotation and height are deliberately ignored so both shoulder mounts
+  retain fixed orientation and elevation. G1 root-to-OpenArm root calibration remains required.

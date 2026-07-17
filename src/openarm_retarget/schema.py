@@ -168,6 +168,7 @@ class SourceConfig:
     gripper_mode: str = "normalized"
     gripper_open_value: float | None = None
     gripper_closed_value: float | None = None
+    cameras: list[str] | None = None
     gripper_interpolation: str = "none"
     gripper_interpolation_max_gap_s: float = 3.0
     gripper_transition_duration_s: float = 1.0

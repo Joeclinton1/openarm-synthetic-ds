@@ -18,7 +18,13 @@ from .audit import audit_all
 from .calibration import calibrate_from_file
 from .batch import convert_lerobot_hour
 from .camera import write_agibot_openarm_camera
-from .download import download_lerobot_hour, plan_lerobot_hour, probe_repo, verify_download
+from .download import (
+    DEFAULT_MAX_SLICE_BYTES,
+    download_lerobot_hour,
+    plan_lerobot_hour,
+    probe_repo,
+    verify_download,
+)
 from .export import export_lerobot_v3, validate_lerobot_v3
 from .filters import filter_episode
 from .ik import OpenArmIK
@@ -95,13 +101,20 @@ def plan_hour(
     config_path: Path,
     destination: Path = Path("data/samples"),
     seconds: float = 3600,
+    max_bytes: int = DEFAULT_MAX_SLICE_BYTES,
 ) -> None:
     config = SourceConfig.from_yaml(config_path)
     if config.adapter == "agibot_h5":
         typer.echo(json.dumps(probe_repo(config.repo_id), indent=2))
         raise typer.Exit(code=2)
     manifest, _ = plan_lerobot_hour(
-        config.repo_id, destination, seconds, config.tabletop_tasks, prefix=config.dataset_prefix
+        config.repo_id,
+        destination,
+        seconds,
+        config.tabletop_tasks,
+        prefix=config.dataset_prefix,
+        cameras=config.cameras,
+        max_bytes=max_bytes,
     )
     typer.echo(json.dumps(manifest, indent=2))
 
@@ -113,6 +126,7 @@ def download_hour(
     seconds: float = 3600,
     camera: list[str] | None = typer.Option(None, help="Video feature to include; repeatable"),
     metadata_only: bool = False,
+    max_bytes: int = DEFAULT_MAX_SLICE_BYTES,
 ) -> None:
     config = SourceConfig.from_yaml(config_path)
     if config.adapter == "agibot_h5":
@@ -123,9 +137,10 @@ def download_hour(
         destination,
         seconds,
         config.tabletop_tasks,
-        cameras=camera,
+        cameras=camera if camera is not None else config.cameras,
         metadata_only=metadata_only,
         prefix=config.dataset_prefix,
+        max_bytes=max_bytes,
     )
     typer.echo(output)
 
@@ -206,6 +221,7 @@ def convert_hour(
     model: Path | None = None,
     max_episodes: int | None = typer.Option(None, help="Acceptance-test subset"),
     resume: bool = True,
+    workers: int = typer.Option(1, min=1, help="Parallel per-episode conversion workers"),
 ) -> None:
     config = SourceConfig.from_yaml(config_path)
     if config.adapter == "agibot_h5":
@@ -220,6 +236,7 @@ def convert_hour(
             max_episodes,
             resume,
             progress=typer.echo,
+            workers=workers,
         )
     )
 

@@ -78,3 +78,46 @@ def test_mask_anchors_can_use_known_mounting_border() -> None:
     base, tool = anchors
     assert base[1] >= 190
     assert tool[1] < 80
+
+
+def test_fixed_shoulder_similarity_uses_one_transform_for_whole_clip() -> None:
+    source_bases = np.repeat([[300.0, 200.0]], 3, axis=0)
+    source_tools = np.array([[400.0, 200.0], [380.0, 240.0], [360.0, 260.0]])
+    target_bases = np.repeat([[20.0, 100.0]], 3, axis=0)
+    rotation = np.array([[0.0, -1.5], [1.5, 0.0]])
+    target_tools = target_bases + (source_tools - source_bases) @ rotation.T
+
+    matrix, scale, angle, shoulder = alignment._fixed_shoulder_similarity(
+        source_bases, source_tools, target_bases, target_tools
+    )
+
+    projected_bases = source_bases @ matrix[:, :2].T + matrix[:, 2]
+    projected_tools = source_tools @ matrix[:, :2].T + matrix[:, 2]
+    np.testing.assert_allclose(projected_bases, np.repeat([shoulder], 3, axis=0), atol=1e-5)
+    np.testing.assert_allclose(projected_tools, target_tools, atol=1e-5)
+    np.testing.assert_allclose(scale, 1.5)
+    np.testing.assert_allclose(angle, np.pi / 2)
+
+
+def test_floor_image_offsets_are_shared_and_capped() -> None:
+    floor = np.array([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    visible = np.ones(3, dtype=bool)
+    shared = np.array([[0.0, 0.0], [50.0, 25.0], [100.0, 50.0]])
+    tracks = {
+        "right": (shared + [500.0, 10.0], np.zeros((3, 2)), visible),
+        "left": (shared + [100.0, 10.0], np.zeros((3, 2)), visible),
+    }
+    offsets, projection = alignment._floor_image_offsets(floor, tracks)
+    np.testing.assert_allclose(offsets, shared)
+    assert np.linalg.svd(projection, compute_uv=False)[0] < 240.0
+
+
+def test_floor_image_offsets_ignore_absent_planar_motion() -> None:
+    floor = np.zeros((4, 3))
+    visible = np.ones(4, dtype=bool)
+    bases = np.array([[10.0, 20.0], [50.0, 80.0], [90.0, 40.0], [20.0, 10.0]])
+    offsets, projection = alignment._floor_image_offsets(
+        floor, {"left": (bases, np.zeros((4, 2)), visible)}
+    )
+    np.testing.assert_allclose(offsets, 0.0)
+    np.testing.assert_allclose(projection, 0.0)

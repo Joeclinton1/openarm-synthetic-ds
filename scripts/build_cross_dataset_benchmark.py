@@ -13,6 +13,7 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from openarm_retarget.camera import write_agibot_openarm_camera, write_static_openarm_camera
+from openarm_retarget.presets import integrate_planar_base_velocity
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -93,14 +94,101 @@ SELECTIONS = (
         "observation.images.primary",
         fixed_start_frame=415,
     ),
+    Selection(
+        "droid",
+        13,
+        "wipe_table_with_cloth",
+        15,
+        ROOT / "data/converted/droid_openarm/episodes/episode_000013.npz",
+        ROOT / "data/samples/lerobot__droid_1.0.1",
+        "observation.images.exterior_1_left",
+        fixed_start_frame=252,
+    ),
+    Selection(
+        "droid",
+        55,
+        "pour_into_two_bowls",
+        15,
+        ROOT / "data/converted/droid_openarm/episodes/episode_000055.npz",
+        ROOT / "data/samples/lerobot__droid_1.0.1",
+        "observation.images.exterior_1_left",
+        fixed_start_frame=180,
+    ),
+    Selection(
+        "rh20t_franka",
+        35,
+        "unscrew_jar_lid",
+        10,
+        ROOT / "data/converted/rh20t_franka_openarm/episodes/episode_000035.npz",
+        ROOT / "data/samples/robot-lev__rh20t_cfg5",
+        "observation.images.cam_037522062165",
+        fixed_start_frame=392,
+    ),
+    Selection(
+        "rh20t_franka",
+        73,
+        "put_knife_on_rack",
+        10,
+        ROOT / "data/converted/rh20t_franka_openarm/episodes/episode_000073.npz",
+        ROOT / "data/samples/robot-lev__rh20t_cfg5",
+        "observation.images.cam_037522062165",
+        fixed_start_frame=265,
+    ),
+    Selection(
+        "robomind_agilex_3rgb",
+        16,
+        "load_plate_rack",
+        30,
+        ROOT / "data/converted/robomind_agilex_openarm/episodes/episode_000016.npz",
+        ROOT / "data/samples/Traly__RoboMIND-lerobot/agilex_3rgb",
+        "observation.images.camera_front",
+        fixed_start_frame=337,
+    ),
+    Selection(
+        "robomind_agilex_3rgb",
+        215,
+        "clean_cup_with_brush",
+        30,
+        ROOT
+        / "data/converted/robomind_agilex_benchmark_supplement/episodes/episode_000215.npz",
+        ROOT / "data/samples/Traly__RoboMIND-lerobot/agilex_3rgb",
+        "observation.images.camera_front",
+        fixed_start_frame=177,
+    ),
 )
 
 
-def _episode_rows(root: Path) -> dict[int, dict]:
+def _episode_rows(root: Path, camera: str) -> dict[int, dict]:
+    columns = [
+        "episode_index",
+        "tasks",
+        f"videos/{camera}/chunk_index",
+        f"videos/{camera}/file_index",
+        f"videos/{camera}/from_timestamp",
+    ]
     rows: list[dict] = []
     for path in sorted((root / "meta/episodes").rglob("*.parquet")):
-        rows.extend(pq.read_table(path).to_pylist())
+        rows.extend(pq.read_table(path, columns=columns).to_pylist())
     return {int(row["episode_index"]): row for row in rows}
+
+
+def _hiw_mobile_base_translations(root: Path, episodes: set[int]) -> dict[int, np.ndarray]:
+    table = pq.read_table(
+        root / "sample/data.parquet",
+        columns=["episode_index", "timestamp", "observation.state.wbc"],
+    )
+    episode_column = np.asarray(table["episode_index"])
+    timestamp_column = np.asarray(table["timestamp"], dtype=np.float64)
+    wbc_column = np.asarray(table["observation.state.wbc"].to_pylist(), dtype=np.float64)
+    result = {}
+    for episode in episodes:
+        selected = episode_column == episode
+        if not np.any(selected):
+            raise KeyError(f"HIW sample does not contain episode {episode}")
+        result[episode] = integrate_planar_base_velocity(
+            timestamp_column[selected], wbc_column[selected, :2]
+        )
+    return result
 
 
 def _motion_window(joints: np.ndarray, feasible: np.ndarray, frames: int) -> tuple[int, int]:
@@ -185,6 +273,7 @@ def _write_agibot_camera(
 def main() -> None:
     OUTPUT.mkdir(parents=True, exist_ok=True)
     row_cache: dict[Path, dict[int, dict]] = {}
+    hiw_mobile_cache: dict[int, np.ndarray] | None = None
     manifest: list[dict] = []
     for selection in SELECTIONS:
         if not selection.converted.exists():
@@ -192,10 +281,24 @@ def main() -> None:
         rows = None
         if selection.camera:
             if selection.source_root not in row_cache:
-                row_cache[selection.source_root] = _episode_rows(selection.source_root)
+                row_cache[selection.source_root] = _episode_rows(
+                    selection.source_root, selection.camera
+                )
             rows = row_cache[selection.source_root]
         with np.load(selection.converted, allow_pickle=False) as archive:
             arrays = {key: archive[key] for key in archive.files}
+        if (
+            selection.dataset == "hiw_500"
+            and "diagnostic_mobile_base_translation_m" not in arrays
+        ):
+            if hiw_mobile_cache is None:
+                hiw_mobile_cache = _hiw_mobile_base_translations(
+                    selection.source_root,
+                    {item.episode for item in SELECTIONS if item.dataset == "hiw_500"},
+                )
+            arrays["diagnostic_mobile_base_translation_m"] = hiw_mobile_cache[
+                selection.episode
+            ]
         first, last = _motion_window(
             arrays["joint_position"], arrays["feasible"], 6 * selection.fps
         )
@@ -250,6 +353,22 @@ def main() -> None:
                 "benchmark_source_video": str(source.relative_to(ROOT)),
             }
         )
+        if selection.dataset == "hiw_500":
+            metadata["mobile_base_model"] = {
+                "translation_velocity_fields": ["pivot_vx", "pivot_vy"],
+                "floor_plane_axes": ["source_x", "source_y"],
+                "fixed_vertical_axis": "source_z",
+                "fixed_height": True,
+                "fixed_orientation": True,
+                "shared_translation_for_both_shoulders": True,
+                "ignored_fields": [
+                    "pivot_vyaw",
+                    "pivot_roll",
+                    "pivot_pitch",
+                    "pivot_yaw",
+                    "pivot_height",
+                ],
+            }
         metadata["active_sides"] = _moving_joint_sides(
             sliced["joint_position"], metadata.get("active_sides", ["right", "left"])
         )

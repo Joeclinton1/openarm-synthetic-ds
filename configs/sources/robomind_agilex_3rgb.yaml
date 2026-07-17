@@ -1,0 +1,26 @@
+name: RoboMIND AgileX 3RGB
+repo_id: Traly/RoboMIND-lerobot
+dataset_prefix: agilex_3rgb
+adapter: lerobot
+fps: 30
+rotation_representation: euler
+rotation_euler_order: xyz
+position_scale: 1.0
+arm_order: [left, right]
+calibrated: false
+gripper_mode: signed
+fields:
+  pose_left: observation.states.end_effector_left
+  pose_right: observation.states.end_effector_right
+  gripper_left: observation.states.gripper_left
+  gripper_right: observation.states.gripper_right
+cameras:
+  - observation.images.camera_front
+  - observation.images.camera_left_wrist
+  - observation.images.camera_right_wrist
+tabletop_tasks: []
+notes: >-
+  AgileX-only bimanual subset from the unofficial RoboMIND LeRobot v3 conversion. Despite stale
+  quaternion labels in its feature metadata, the source values are xyz-rpy plus gripper and the
+  converter's published rotation statistics confirm the Euler representation. Gripper closure is
+  normalized per episode. Dataset-level base/tool/camera calibration remains required.

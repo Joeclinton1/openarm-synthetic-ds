@@ -21,6 +21,9 @@ ROOT = Path(__file__).resolve().parents[1]
 BENCHMARK = ROOT / "outputs/cross_dataset_openarm_benchmark"
 SIDES = ("right", "left")
 MOLMO_FIXED_CAMERA_RENDER_SCALE = 0.825
+FIXED_SHOULDER_DATASETS = {"droid", "rh20t_franka", "robomind_agilex_3rgb"}
+MOBILE_FLOOR_DATASETS = {"hiw_500"}
+MAX_FLOOR_PROJECTION_PX_PER_M = 240.0
 
 
 def alpha_over(bottom: np.ndarray, top: np.ndarray) -> np.ndarray:
@@ -331,6 +334,65 @@ def _fixed_scale_tool_similarity(
     return matrix, scale, float(np.arctan2(sine, cosine))
 
 
+def _fixed_shoulder_similarity(
+    source_bases: np.ndarray,
+    source_tools: np.ndarray,
+    target_bases: np.ndarray,
+    target_tools: np.ndarray,
+) -> tuple[np.ndarray, float, float, np.ndarray]:
+    """Fit one clip-wide similarity while pinning the target shoulder to one image point."""
+    source_axes = np.asarray(source_tools) - np.asarray(source_bases)
+    target_axes = np.asarray(target_tools) - np.asarray(target_bases)
+    if len(source_axes) == 0 or np.any(np.linalg.norm(source_axes, axis=1) < 1e-6):
+        raise RuntimeError("Degenerate fixed-shoulder source projection")
+    source_complex = source_axes[:, 0] + 1j * source_axes[:, 1]
+    target_complex = target_axes[:, 0] + 1j * target_axes[:, 1]
+    coefficient = np.sum(np.conj(source_complex) * target_complex) / np.sum(
+        np.abs(source_complex) ** 2
+    )
+    angle = float(np.angle(coefficient))
+    scale = float(np.clip(np.abs(coefficient), 0.35, 2.2))
+    cosine, sine = np.cos(angle), np.sin(angle)
+    linear = scale * np.asarray([[cosine, -sine], [sine, cosine]], dtype=np.float64)
+    source_shoulder = np.median(source_bases, axis=0)
+    target_shoulder = np.median(target_bases, axis=0)
+    translation = target_shoulder - linear @ source_shoulder
+    matrix = np.column_stack([linear, translation]).astype(np.float32)
+    return matrix, scale, angle, target_shoulder
+
+
+def _floor_image_offsets(
+    floor_translation_m: np.ndarray,
+    tracks: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
+    maximum_pixels_per_metre: float = MAX_FLOOR_PROJECTION_PX_PER_M,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Project measured floor translation to one shared image translation for all shoulders."""
+    floor_xy = np.asarray(floor_translation_m, dtype=np.float64)[:, :2]
+    if floor_xy.ndim != 2 or floor_xy.shape[1] != 2:
+        raise ValueError("floor_translation_m must have shape [T, 3]")
+    if maximum_pixels_per_metre <= 0:
+        raise ValueError("maximum_pixels_per_metre must be positive")
+    source_rows = []
+    target_rows = []
+    for target_bases, _target_tools, visible in tracks.values():
+        indices = np.where(visible)[0]
+        source = floor_xy[indices]
+        target = target_bases[indices]
+        source_rows.append(source - np.mean(source, axis=0))
+        target_rows.append(target - np.mean(target, axis=0))
+    source = np.concatenate(source_rows, axis=0)
+    target = np.concatenate(target_rows, axis=0)
+    if np.linalg.norm(source) < 1e-9:
+        projection = np.zeros((2, 2), dtype=np.float64)
+    else:
+        projection = np.linalg.lstsq(source, target, rcond=None)[0]
+        left, singular, right = np.linalg.svd(projection, full_matrices=False)
+        singular = np.clip(singular, 0.0, maximum_pixels_per_metre)
+        projection = (left * singular) @ right
+    offsets = (floor_xy - floor_xy[0]) @ projection
+    return offsets, projection
+
+
 def _edge_tool_similarity(
     rgba: np.ndarray,
     source_base: np.ndarray,
@@ -453,6 +515,11 @@ def align_clip(clip: Path) -> dict:
     scene = json.loads((clip / "render_scene/scene.json").read_text())
     with np.load(clip / "trajectory.npz", allow_pickle=False) as trajectory:
         metadata = json.loads(str(trajectory["metadata_json"].item()))
+        mobile_base_translation = (
+            trajectory["diagnostic_mobile_base_translation_m"].copy()
+            if "diagnostic_mobile_base_translation_m" in trajectory
+            else None
+        )
     active = [side for side in SIDES if side in metadata.get("active_sides", SIDES)]
     if scene.get("benchmark_projection", {}).get("mode") == (
         "accepted AgiBot fixture camera registration"
@@ -511,6 +578,30 @@ def align_clip(clip: Path) -> dict:
     if not tracks:
         raise RuntimeError(f"No source arm tracks in {clip}")
 
+    fixed_shoulder_mode = clip.parent.name in FIXED_SHOULDER_DATASETS
+    mobile_floor_mode = clip.parent.name in MOBILE_FLOOR_DATASETS
+    fixed_shoulder_transforms: dict[str, tuple[np.ndarray, float, float, np.ndarray]] = {}
+    if fixed_shoulder_mode or mobile_floor_mode:
+        for side, (target_bases, target_tools, visible) in tracks.items():
+            indices = np.where(visible)[0]
+            source_points = [
+                _scene_side_points(scene, side, int(index))[:2] for index in indices
+            ]
+            fixed_shoulder_transforms[side] = _fixed_shoulder_similarity(
+                np.stack([value[0] for value in source_points]),
+                np.stack([value[1] for value in source_points]),
+                target_bases[indices],
+                target_tools[indices],
+            )
+    floor_image_offsets = np.zeros((frame_count, 2), dtype=np.float64)
+    floor_image_projection = np.zeros((2, 2), dtype=np.float64)
+    if mobile_floor_mode:
+        if mobile_base_translation is None:
+            raise RuntimeError(f"HIW trajectory lacks measured mobile-base translation: {clip}")
+        floor_image_offsets, floor_image_projection = _floor_image_offsets(
+            mobile_base_translation, tracks
+        )
+
     fixed_scales: dict[str, float] = {}
     if agibot_active_arm_mode:
         for side, (target_bases, target_tools, visible) in tracks.items():
@@ -533,6 +624,7 @@ def align_clip(clip: Path) -> dict:
             "scales": [],
             "angles": [],
             "base_errors": [],
+            "base_positions": [],
             "tool_errors": [],
             "visible": 0,
         }
@@ -558,7 +650,14 @@ def align_clip(clip: Path) -> dict:
             if not visible[index]:
                 continue
             source_base, source_tool, _ = _scene_side_points(scene, side, index)
-            if side in fixed_scales:
+            if mobile_floor_mode:
+                base_matrix, scale, angle, reference_shoulder = fixed_shoulder_transforms[side]
+                target_shoulder = reference_shoulder + floor_image_offsets[index]
+                matrix = base_matrix.copy()
+                matrix[:, 2] = target_shoulder - matrix[:, :2] @ source_base
+            elif fixed_shoulder_mode:
+                matrix, scale, angle, target_shoulder = fixed_shoulder_transforms[side]
+            elif side in fixed_scales:
                 matrix, scale, angle = _fixed_scale_tool_similarity(
                     source_base,
                     source_tool,
@@ -580,7 +679,9 @@ def align_clip(clip: Path) -> dict:
             # For an uncalibrated source, the two observable constraints that must remain exact are
             # where the arm enters the image and where its tool acts.  A silhouette-only scale can
             # look superficially plausible while moving the base to the wrong image edge.
-            if not agibot_active_arm_mode:
+            if mobile_floor_mode or fixed_shoulder_mode:
+                pass
+            elif not agibot_active_arm_mode:
                 if molmo_camera_fit:
                     # The fitted fixed camera already supplies the correct 3-D projection,
                     # including wrist direction. Keep one audited apparent-size correction for
@@ -608,15 +709,22 @@ def align_clip(clip: Path) -> dict:
                 borderValue=(0, 0, 0, 0),
             )
             aligned_sides.append(aligned)
+            projected_base = matrix[:, :2] @ source_base + matrix[:, 2]
             projected_tool = matrix[:, :2] @ source_tool + matrix[:, 2]
             stats = side_stats[side]
             stats["scales"].append(scale)
             stats["angles"].append(angle)
-            stats["base_errors"].append(
-                _entry_error(aligned[..., 3] > 2, target_bases[index])
-                if not agibot_active_arm_mode
-                else 0.0
-            )
+            stats["base_positions"].append(projected_base)
+            if mobile_floor_mode or fixed_shoulder_mode:
+                stats["base_errors"].append(
+                    float(np.linalg.norm(projected_base - target_shoulder))
+                )
+            else:
+                stats["base_errors"].append(
+                    _entry_error(aligned[..., 3] > 2, target_bases[index])
+                    if not agibot_active_arm_mode
+                    else 0.0
+                )
             stats["tool_errors"].append(float(np.linalg.norm(projected_tool - target_tools[index])))
             stats["visible"] = int(stats["visible"]) + int(visible[index])
         result = np.zeros((480, 640, 4), dtype=np.uint8)
@@ -632,11 +740,18 @@ def align_clip(clip: Path) -> dict:
 
     side_summary = {}
     for side, stats in side_stats.items():
+        base_positions = np.asarray(stats["base_positions"])
+        base_position_mean = np.mean(base_positions, axis=0)
         side_summary[side] = {
             "visible_frames": int(stats["visible"]),
             "mean_scale": float(np.mean(stats["scales"])),
             "mean_rotation_deg": float(np.rad2deg(np.mean(stats["angles"]))),
+            "rotation_std_deg": float(np.rad2deg(np.std(stats["angles"]))),
+            "scale_std": float(np.std(stats["scales"])),
             "base_anchor_rmse_px": float(np.sqrt(np.mean(np.square(stats["base_errors"])))),
+            "shoulder_position_std_px": float(
+                np.sqrt(np.mean(np.sum(np.square(base_positions - base_position_mean), axis=1)))
+            ),
             "tool_anchor_rmse_px": float(np.sqrt(np.mean(np.square(stats["tool_errors"])))),
             "source_track": (
                 f"masks_manual_{side}"
@@ -653,7 +768,12 @@ def align_clip(clip: Path) -> dict:
     )
     manifest = {
         "method": (
-            scale_method
+            "constant-pose shoulders with shared source-floor mobile-base translation"
+            if mobile_floor_mode
+            else
+            "clip-wide fixed-shoulder similarity"
+            if fixed_shoulder_mode
+            else scale_method
             if molmo_camera_fit
             else f"rigid per-arm tool registration with {scale_method}"
         ),
@@ -663,10 +783,52 @@ def align_clip(clip: Path) -> dict:
         "aligned_sides": list(tracks),
         "agibot_active_arm_mode": agibot_active_arm_mode,
         "fixed_side_scales": fixed_scales,
+        "fixed_shoulder": fixed_shoulder_mode,
+        "fixed_shoulder_anchors_px": {
+            side: transform[3].tolist()
+            for side, transform in fixed_shoulder_transforms.items()
+        },
+        "mobile_base_floor_model": (
+            {
+                "enabled": True,
+                "translation_only": True,
+                "shared_by_both_shoulders": True,
+                "floor_plane_axes": ["source_x", "source_y"],
+                "fixed_vertical_axis": "source_z",
+                "fixed_height": True,
+                "fixed_orientation": True,
+                "source_translation_range_m": np.ptp(
+                    mobile_base_translation[:, :2], axis=0
+                ).tolist(),
+                "image_projection_px_per_m": floor_image_projection.tolist(),
+                "maximum_projection_px_per_m": MAX_FLOOR_PROJECTION_PX_PER_M,
+                "image_translation_range_px": np.ptp(
+                    floor_image_offsets, axis=0
+                ).tolist(),
+                "ignored_source_motion": [
+                    "pivot_vyaw",
+                    "pivot_roll",
+                    "pivot_pitch",
+                    "pivot_yaw",
+                    "pivot_height",
+                ],
+            }
+            if mobile_floor_mode
+            else {"enabled": False}
+        ),
         "side_metrics": side_summary,
         "render_alpha_inside_source_mask": overlap_intersection / max(overlap_render, 1),
         "source_mask_covered_by_render": overlap_intersection / max(overlap_source, 1),
-        "warning": "2-D source-track registration is for visual review, not metric supervision.",
+        "warning": (
+            "HIW shoulder pose is constant; both shoulders share only the image projection of "
+            "integrated source x-y floor translation. Source rotation and height are ignored."
+            if mobile_floor_mode
+            else
+            "One clip-wide 2-D similarity fixes each OpenArm shoulder; source tool overlap is "
+            "diagnostic and is not forced per frame."
+            if fixed_shoulder_mode
+            else "2-D source-track registration is for visual review, not metric supervision."
+        ),
     }
     (output / "alignment_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest
